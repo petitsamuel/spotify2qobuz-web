@@ -1,0 +1,75 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+.venv/
+venv/
+ENV/
+env/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Credentials (IMPORTANT! NEVER COMMIT THESE!)
+credentials.md
+credentials*.md
+.env
+*.env
+*.pem
+*.key
+
+# HAR files (may contain tokens)
+*.har
+
+# Logs
+*.log
+logs/
+sync_logs/
+
+# Reports
+sync_report_*.json
+
+# Spotify cache
+.cache
+.cache-*
+
+# Backup files
+*.bak
+*.old
+README.old.md
+
+# OS
+.DS_Store
+Thumbs.db
