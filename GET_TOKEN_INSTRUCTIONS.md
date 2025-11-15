@@ -1,6 +1,6 @@
 # How to Get Your Qobuz Session Token
 
-This project uses **token-based authentication** instead of app_id/password to avoid API restrictions and support Google login accounts.
+This project uses **token-based authentication** instead of app_id/password to avoid API restrictions. Works with any Qobuz account (email, Google, Facebook, Apple ID, etc.).
 
 ## Quick Start (Recommended: HAR File Method)
 
@@ -9,7 +9,8 @@ This project uses **token-based authentication** instead of app_id/password to a
 This is the easiest method - let the browser capture everything automatically.
 
 1. **Open Qobuz Web Player**
-   - Go to https://play.qobuz.com and login
+   - Go to https://play.qobuz.com
+   - Login with your account (any login method works: email, Google, Facebook, Apple ID, etc.)
 
 2. **Open DevTools Network Tab**
    - Press `Cmd+Option+I` (Mac) or `F12` (Windows/Linux)
@@ -43,7 +44,7 @@ This is the easiest method - let the browser capture everything automatically.
 ### 1. Login to Qobuz Web Player
 1. Open your browser (Chrome, Firefox, Safari, etc.)
 2. Go to https://play.qobuz.com
-3. Login with your account (Google login works fine!)
+3. Login with your account (any login method: email, Google, Facebook, Apple ID, etc.)
 
 ### 2. Open Browser Developer Tools
 

@@ -9,7 +9,7 @@ Automatically sync all your Spotify playlists to Qobuz with intelligent duplicat
 - 🎯 **High accuracy matching** (89%+ success rate)
   - ISRC-based matching (most accurate)
   - Fuzzy matching fallback for tracks without ISRC
-- 🔐 **Token-based authentication** - works with Google login accounts
+- 🔐 **Token-based authentication** - works with any Qobuz account (email, Google, Facebook, etc.)
 - 📊 **Detailed reporting** - JSON reports with match statistics
 - 🪵 **Comprehensive logging** - auto-generated timestamped logs
 - 🧪 **Well tested** - 88 unit tests, 92% code coverage

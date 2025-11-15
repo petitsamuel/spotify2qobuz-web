@@ -42,7 +42,7 @@ pip install -r requirements.txt
 
 1. **Open Qobuz Web Player**
    - Go to https://play.qobuz.com
-   - Log in with your account (Google login works!)
+   - Login with your account (any login method works)
 
 2. **Open Browser DevTools**
    - **Mac:** Press `Cmd+Option+I`
