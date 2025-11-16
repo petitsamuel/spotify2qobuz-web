@@ -56,12 +56,27 @@ def setup_logger(name: str = "spotify_qobuz_sync", log_file: str = None) -> logg
 
 def get_logger(name: str = "spotify_qobuz_sync") -> logging.Logger:
     """
-    Get or create a logger instance.
+    Get or create a logger instance with console output.
     
     Args:
         name: Logger name
     
     Returns:
-        Logger instance
+        Logger instance with console handler
     """
-    return logging.getLogger(name)
+    logger = logging.getLogger(name)
+    
+    # If logger doesn't have handlers yet, set up console output
+    if not logger.handlers:
+        logger.setLevel(logging.INFO)
+        
+        # Console handler for terminal output
+        console_handler = logging.StreamHandler(sys.stdout)
+        console_handler.setLevel(logging.INFO)
+        console_formatter = logging.Formatter(
+            '%(message)s'  # Simple format for console
+        )
+        console_handler.setFormatter(console_formatter)
+        logger.addHandler(console_handler)
+    
+    return logger
