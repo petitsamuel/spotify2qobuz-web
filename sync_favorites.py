@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from src.spotify_client import SpotifyClient
 from src.qobuz_client import QobuzClient
 from src.favorite_sync_service import FavoriteSyncService
-from src.utils.credentials import load_credentials
+from src.utils.credentials import parse_credentials
 from src.utils.logger import get_logger
 
 
@@ -68,14 +68,14 @@ Examples:
     try:
         # Load credentials
         logger.info(f"Loading credentials from {args.credentials}")
-        creds = load_credentials(args.credentials)
+        creds = parse_credentials(args.credentials)
         
         # Initialize clients
         logger.info("Initializing Spotify client...")
         spotify_client = SpotifyClient(
-            client_id=creds['SPOTIPY_CLIENT_ID'],
-            client_secret=creds['SPOTIPY_CLIENT_SECRET'],
-            redirect_uri=creds['SPOTIPY_REDIRECT_URI']
+            client_id=creds['SPOTIFY_CLIENT_ID'],
+            client_secret=creds['SPOTIFY_CLIENT_SECRET'],
+            redirect_uri=creds['SPOTIFY_REDIRECT_URI']
         )
         
         logger.info("Authenticating with Spotify...")

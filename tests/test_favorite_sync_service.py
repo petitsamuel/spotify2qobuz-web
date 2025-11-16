@@ -45,10 +45,8 @@ class TestFavoriteSyncService:
         assert stats['not_found'] == 0
         mock_spotify_client.get_saved_tracks.assert_called_once()
     
-    @patch('src.favorite_sync_service.find_best_match')
     def test_sync_favorites_success(
         self,
-        mock_find_best_match,
         favorite_sync_service,
         mock_spotify_client,
         mock_qobuz_client
@@ -75,17 +73,9 @@ class TestFavoriteSyncService:
         mock_spotify_client.get_saved_tracks.return_value = spotify_tracks
         mock_qobuz_client.get_favorite_tracks.return_value = []
         
-        # Mock search results
-        mock_qobuz_client.search_track.side_effect = [
-            [{'id': 123456, 'title': 'Track 1'}],  # Results for track 1
-            [{'id': 789012, 'title': 'Track 2'}]   # Results for track 2
-        ]
-        
-        # Mock find_best_match
-        mock_find_best_match.side_effect = [
-            {'id': 123456, 'title': 'Track 1'},
-            {'id': 789012, 'title': 'Track 2'}
-        ]
+        # Mock search results - search_by_isrc and search_by_metadata return single dict or None
+        mock_qobuz_client.search_by_isrc.return_value = {'id': 123456, 'title': 'Track 1', 'artist': 'Artist 1', 'album': 'Album 1', 'duration': 200000}
+        mock_qobuz_client.search_by_metadata.return_value = {'id': 789012, 'title': 'Track 2', 'artist': 'Artist 2', 'album': 'Album 2', 'duration': 180000}
         
         # Mock add_favorite_track
         mock_qobuz_client.add_favorite_track.return_value = True
@@ -99,15 +89,16 @@ class TestFavoriteSyncService:
         assert stats['already_favorited'] == 0
         
         # Verify API calls
-        assert mock_qobuz_client.search_track.call_count == 2
+        mock_qobuz_client.search_by_isrc.assert_called_once_with('ISRC001')
+        mock_qobuz_client.search_by_metadata.assert_called_once_with(
+            title='Track 2', artist='Artist 2', duration=180000
+        )
         assert mock_qobuz_client.add_favorite_track.call_count == 2
         mock_qobuz_client.add_favorite_track.assert_any_call(123456)
         mock_qobuz_client.add_favorite_track.assert_any_call(789012)
     
-    @patch('src.favorite_sync_service.find_best_match')
     def test_sync_favorites_dry_run(
         self,
-        mock_find_best_match,
         favorite_sync_service,
         mock_spotify_client,
         mock_qobuz_client
@@ -125,8 +116,7 @@ class TestFavoriteSyncService:
         
         mock_spotify_client.get_saved_tracks.return_value = spotify_tracks
         mock_qobuz_client.get_favorite_tracks.return_value = []
-        mock_qobuz_client.search_track.return_value = [{'id': 123456, 'title': 'Track 1'}]
-        mock_find_best_match.return_value = {'id': 123456, 'title': 'Track 1'}
+        mock_qobuz_client.search_by_isrc.return_value = {'id': 123456, 'title': 'Track 1', 'artist': 'Artist 1', 'album': 'Album 1', 'duration': 200000}
         
         stats = favorite_sync_service.sync_favorites(dry_run=True, skip_existing=True)
         
@@ -134,10 +124,8 @@ class TestFavoriteSyncService:
         # In dry run, add_favorite_track should NOT be called
         mock_qobuz_client.add_favorite_track.assert_not_called()
     
-    @patch('src.favorite_sync_service.find_best_match')
     def test_sync_favorites_skip_existing(
         self,
-        mock_find_best_match,
         favorite_sync_service,
         mock_spotify_client,
         mock_qobuz_client
@@ -164,15 +152,9 @@ class TestFavoriteSyncService:
         # Track 123456 is already favorited
         mock_qobuz_client.get_favorite_tracks.return_value = [123456]
         
-        mock_qobuz_client.search_track.side_effect = [
-            [{'id': 123456, 'title': 'Track 1'}],
-            [{'id': 789012, 'title': 'Track 2'}]
-        ]
-        
-        mock_find_best_match.side_effect = [
-            {'id': 123456, 'title': 'Track 1'},
-            {'id': 789012, 'title': 'Track 2'}
-        ]
+        # First track found by ISRC (already favorited), second by metadata
+        mock_qobuz_client.search_by_isrc.return_value = {'id': 123456, 'title': 'Track 1', 'artist': 'Artist 1', 'album': 'Album 1', 'duration': 200000}
+        mock_qobuz_client.search_by_metadata.return_value = {'id': 789012, 'title': 'Track 2', 'artist': 'Artist 2', 'album': 'Album 2', 'duration': 180000}
         
         mock_qobuz_client.add_favorite_track.return_value = True
         
@@ -183,10 +165,8 @@ class TestFavoriteSyncService:
         # Should only add Track 2 to favorites
         mock_qobuz_client.add_favorite_track.assert_called_once_with(789012)
     
-    @patch('src.favorite_sync_service.find_best_match')
     def test_sync_favorites_no_skip_existing(
         self,
-        mock_find_best_match,
         favorite_sync_service,
         mock_spotify_client,
         mock_qobuz_client
@@ -203,8 +183,7 @@ class TestFavoriteSyncService:
         ]
         
         mock_spotify_client.get_saved_tracks.return_value = spotify_tracks
-        mock_qobuz_client.search_track.return_value = [{'id': 123456, 'title': 'Track 1'}]
-        mock_find_best_match.return_value = {'id': 123456, 'title': 'Track 1'}
+        mock_qobuz_client.search_by_isrc.return_value = {'id': 123456, 'title': 'Track 1', 'artist': 'Artist 1', 'album': 'Album 1', 'duration': 200000}
         mock_qobuz_client.add_favorite_track.return_value = True
         
         stats = favorite_sync_service.sync_favorites(dry_run=False, skip_existing=False)
@@ -234,8 +213,8 @@ class TestFavoriteSyncService:
         
         mock_spotify_client.get_saved_tracks.return_value = spotify_tracks
         mock_qobuz_client.get_favorite_tracks.return_value = []
-        # Empty search results
-        mock_qobuz_client.search_track.return_value = []
+        # No ISRC, and metadata search returns None
+        mock_qobuz_client.search_by_metadata.return_value = None
         
         stats = favorite_sync_service.sync_favorites()
         
@@ -243,41 +222,8 @@ class TestFavoriteSyncService:
         assert stats['matched'] == 0
         mock_qobuz_client.add_favorite_track.assert_not_called()
     
-    @patch('src.favorite_sync_service.find_best_match')
-    def test_sync_favorites_no_good_match(
-        self,
-        mock_find_best_match,
-        favorite_sync_service,
-        mock_spotify_client,
-        mock_qobuz_client
-    ):
-        """Test syncing when no good match is found."""
-        spotify_tracks = [
-            {
-                'title': 'Track 1',
-                'artist': 'Artist 1',
-                'album': 'Album 1',
-                'duration': 200000,
-                'isrc': None
-            }
-        ]
-        
-        mock_spotify_client.get_saved_tracks.return_value = spotify_tracks
-        mock_qobuz_client.get_favorite_tracks.return_value = []
-        mock_qobuz_client.search_track.return_value = [{'id': 123456, 'title': 'Different Track'}]
-        # find_best_match returns None (no good match)
-        mock_find_best_match.return_value = None
-        
-        stats = favorite_sync_service.sync_favorites()
-        
-        assert stats['skipped_no_match'] == 1
-        assert stats['matched'] == 0
-        mock_qobuz_client.add_favorite_track.assert_not_called()
-    
-    @patch('src.favorite_sync_service.find_best_match')
     def test_sync_favorites_add_failure(
         self,
-        mock_find_best_match,
         favorite_sync_service,
         mock_spotify_client,
         mock_qobuz_client
@@ -295,8 +241,7 @@ class TestFavoriteSyncService:
         
         mock_spotify_client.get_saved_tracks.return_value = spotify_tracks
         mock_qobuz_client.get_favorite_tracks.return_value = []
-        mock_qobuz_client.search_track.return_value = [{'id': 123456, 'title': 'Track 1'}]
-        mock_find_best_match.return_value = {'id': 123456, 'title': 'Track 1'}
+        mock_qobuz_client.search_by_isrc.return_value = {'id': 123456, 'title': 'Track 1', 'artist': 'Artist 1', 'album': 'Album 1', 'duration': 200000}
         # add_favorite_track returns False (failure)
         mock_qobuz_client.add_favorite_track.return_value = False
         
@@ -305,10 +250,8 @@ class TestFavoriteSyncService:
         assert stats['failed'] == 1
         assert stats['matched'] == 0
     
-    @patch('src.favorite_sync_service.find_best_match')
     def test_sync_favorites_search_exception(
         self,
-        mock_find_best_match,
         favorite_sync_service,
         mock_spotify_client,
         mock_qobuz_client
@@ -326,8 +269,8 @@ class TestFavoriteSyncService:
         
         mock_spotify_client.get_saved_tracks.return_value = spotify_tracks
         mock_qobuz_client.get_favorite_tracks.return_value = []
-        # search_track raises exception
-        mock_qobuz_client.search_track.side_effect = Exception("Search API error")
+        # search_by_isrc raises exception
+        mock_qobuz_client.search_by_isrc.side_effect = Exception("Search API error")
         
         stats = favorite_sync_service.sync_favorites()
         

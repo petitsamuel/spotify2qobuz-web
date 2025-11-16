@@ -509,3 +509,91 @@ class TestQobuzClient:
             result = authenticated_client.is_track_favorited(123456)
         
         assert result is False
+    
+    def test_list_user_playlists_success(self, authenticated_client):
+        """Test listing user playlists successfully."""
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            'playlists': {
+                'items': [
+                    {'id': 123, 'name': 'Playlist 1', 'tracks_count': 10},
+                    {'id': 456, 'name': 'Playlist 2', 'tracks_count': 5}
+                ]
+            }
+        }
+        
+        with patch.object(authenticated_client._session, 'get', return_value=mock_response):
+            result = authenticated_client.list_user_playlists()
+        
+        assert len(result) == 2
+        assert result[0]['id'] == '123'
+        assert result[0]['name'] == 'Playlist 1'
+        assert result[0]['tracks_count'] == 10
+    
+    def test_list_user_playlists_empty(self, authenticated_client):
+        """Test listing user playlists when there are none."""
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {'playlists': {}}
+        
+        with patch.object(authenticated_client._session, 'get', return_value=mock_response):
+            result = authenticated_client.list_user_playlists()
+        
+        assert result == []
+    
+    def test_list_user_playlists_error(self, authenticated_client):
+        """Test listing user playlists when an error occurs."""
+        with patch.object(authenticated_client._session, 'get', side_effect=Exception("API error")):
+            result = authenticated_client.list_user_playlists()
+        
+        assert result == []
+    
+    def test_get_playlist_tracks_success(self, authenticated_client):
+        """Test getting playlist tracks successfully."""
+        with patch.object(authenticated_client, 'get_playlist', return_value={
+            'tracks': {
+                'items': [
+                    {'id': 123, 'title': 'Track 1'},
+                    {'id': 456, 'title': 'Track 2'}
+                ]
+            }
+        }):
+            result = authenticated_client.get_playlist_tracks('playlist_123')
+        
+        assert result == [123, 456]
+    
+    def test_get_playlist_tracks_no_tracks(self, authenticated_client):
+        """Test getting playlist tracks when playlist has no tracks."""
+        with patch.object(authenticated_client, 'get_playlist', return_value={'id': 123, 'name': 'Empty'}):
+            result = authenticated_client.get_playlist_tracks('playlist_123')
+        
+        assert result == []
+    
+    def test_get_playlist_tracks_error(self, authenticated_client):
+        """Test getting playlist tracks when an error occurs."""
+        with patch.object(authenticated_client, 'get_playlist', side_effect=Exception("API error")):
+            result = authenticated_client.get_playlist_tracks('playlist_123')
+        
+        assert result == []
+    
+    def test_find_playlist_by_name_found(self, authenticated_client):
+        """Test finding a playlist by name when it exists."""
+        with patch.object(authenticated_client, 'list_user_playlists', return_value=[
+            {'id': '123', 'name': 'My Playlist', 'tracks_count': 10},
+            {'id': '456', 'name': 'Another Playlist', 'tracks_count': 5}
+        ]):
+            result = authenticated_client.find_playlist_by_name('My Playlist')
+        
+        assert result is not None
+        assert result['id'] == '123'
+        assert result['name'] == 'My Playlist'
+    
+    def test_find_playlist_by_name_not_found(self, authenticated_client):
+        """Test finding a playlist by name when it doesn't exist."""
+        with patch.object(authenticated_client, 'list_user_playlists', return_value=[
+            {'id': '123', 'name': 'My Playlist', 'tracks_count': 10}
+        ]):
+            result = authenticated_client.find_playlist_by_name('Nonexistent Playlist')
+        
+        assert result is None

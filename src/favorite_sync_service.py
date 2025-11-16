@@ -3,7 +3,6 @@
 from typing import Dict, List, Tuple
 from src.spotify_client import SpotifyClient
 from src.qobuz_client import QobuzClient
-from src.matcher import find_best_match
 from src.utils.logger import get_logger
 
 
@@ -80,25 +79,26 @@ class FavoriteSyncService:
             
             # Search for track in Qobuz
             try:
-                search_results = self.qobuz_client.search_track(
-                    title=track_name,
-                    artist=artist_name
-                )
+                # Try ISRC match first if available
+                qobuz_track = None
+                if spotify_track.get('isrc'):
+                    qobuz_track = self.qobuz_client.search_by_isrc(spotify_track['isrc'])
                 
-                if not search_results:
+                # Fall back to metadata search if ISRC didn't work
+                if not qobuz_track:
+                    qobuz_track = self.qobuz_client.search_by_metadata(
+                        title=track_name,
+                        artist=artist_name,
+                        duration=spotify_track['duration']
+                    )
+                
+                if not qobuz_track:
                     logger.warning(f"  ❌ Not found in Qobuz: {artist_name} - {track_name}")
                     stats['not_found'] += 1
                     continue
                 
-                # Find best match
-                best_match = find_best_match(spotify_track, search_results)
-                
-                if not best_match:
-                    logger.warning(f"  ⚠️  No good match found for: {artist_name} - {track_name}")
-                    stats['skipped_no_match'] += 1
-                    continue
-                
-                qobuz_track_id = best_match['id']
+                # We have a match
+                qobuz_track_id = qobuz_track['id']
                 
                 # Check if already favorited
                 if skip_existing and qobuz_track_id in existing_favorites:

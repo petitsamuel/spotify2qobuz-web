@@ -530,6 +530,120 @@ class TestSyncService:
         assert result is False
         assert len(sync_service.report.errors) > 0
     
+    def test_sync_playlist_update_existing_found(
+        self, sync_service, mock_spotify_client, mock_qobuz_client, mock_matcher
+    ):
+        """Test sync_playlist with update_existing=True and existing playlist found."""
+        sync_service.spotify_client = mock_spotify_client
+        sync_service.qobuz_client = mock_qobuz_client
+        sync_service.matcher = mock_matcher
+        
+        playlist = {
+            'id': 'test_id',
+            'name': 'Test Playlist',
+            'tracks_count': 2
+        }
+        
+        spotify_tracks = [
+            {
+                'title': 'Track 1',
+                'artist': 'Artist 1',
+                'album': 'Album 1',
+                'duration': 200000,
+                'isrc': 'ISRC001'
+            },
+            {
+                'title': 'Track 2',
+                'artist': 'Artist 2',
+                'album': 'Album 2',
+                'duration': 180000,
+                'isrc': 'ISRC002'
+            }
+        ]
+        
+        mock_spotify_client.list_tracks.return_value = spotify_tracks
+        
+        # Mock existing playlist found
+        mock_qobuz_client.find_playlist_by_name.return_value = {
+            'id': 'existing_id',
+            'name': 'Test Playlist',
+            'tracks_count': 1
+        }
+        mock_qobuz_client.get_playlist_tracks.return_value = [123]  # One track already exists
+        
+        # Mock matcher
+        mock_match1 = Mock()
+        mock_match1.matched = True
+        mock_match1.match_type = 'isrc'
+        mock_match1.qobuz_track = {'id': 123, 'title': 'Track 1'}
+        
+        mock_match2 = Mock()
+        mock_match2.matched = True
+        mock_match2.match_type = 'isrc'
+        mock_match2.qobuz_track = {'id': 456, 'title': 'Track 2'}
+        
+        mock_matcher.match_track.side_effect = [mock_match1, mock_match2]
+        mock_qobuz_client.add_track.return_value = True
+        
+        result = sync_service.sync_playlist(playlist, dry_run=False, update_existing=True)
+        
+        assert result is True
+        # Track 123 should be skipped (already in playlist), track 456 should be added
+        mock_qobuz_client.add_track.assert_called_once_with('existing_id', 456)
+    
+    def test_sync_playlist_create_failure_return_false(
+        self, sync_service, mock_spotify_client, mock_qobuz_client, mock_matcher
+    ):
+        """Test sync_playlist when playlist creation fails returns False."""
+        sync_service.spotify_client = mock_spotify_client
+        sync_service.qobuz_client = mock_qobuz_client
+        sync_service.matcher = mock_matcher
+        
+        playlist = {
+            'id': 'test_id',
+            'name': 'Test Playlist',
+            'tracks_count': 1
+        }
+        
+        spotify_tracks = [
+            {
+                'title': 'Track 1',
+                'artist': 'Artist 1',
+                'album': 'Album 1',
+                'duration': 200000,
+                'isrc': 'ISRC001'
+            }
+        ]
+        
+        mock_spotify_client.list_tracks.return_value = spotify_tracks
+        # Playlist creation returns None (failure)
+        mock_qobuz_client.create_playlist.return_value = None
+        
+        result = sync_service.sync_playlist(playlist, dry_run=False, update_existing=False)
+        
+        assert result is False
+        assert len(sync_service.report.errors) > 0
+    
+    def test_sync_all_playlists_with_update_existing_false(
+        self, sync_service, mock_spotify_client, mock_qobuz_client, mock_matcher
+    ):
+        """Test sync_all_playlists with update_existing=False to cover CREATE MODE log."""
+        sync_service.spotify_client = mock_spotify_client
+        sync_service.qobuz_client = mock_qobuz_client
+        sync_service.matcher = mock_matcher
+        
+        playlists = [
+            {'id': '1', 'name': 'Playlist 1', 'tracks_count': 1}
+        ]
+        
+        mock_spotify_client.list_playlists.return_value = playlists
+        mock_spotify_client.list_tracks.return_value = []
+        
+        sync_service.sync_all_playlists(dry_run=False, update_existing=False)
+        
+        # Just verify it runs without error
+        mock_spotify_client.list_playlists.assert_called_once()
+    
     def test_sync_all_playlists_no_playlists(
         self, sync_service, mock_spotify_client, mock_qobuz_client, mock_matcher
     ):
