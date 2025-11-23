@@ -214,6 +214,33 @@ class TestQobuzClient:
         
         assert result is False
     
+    def test_add_track_failure_with_json_response(self, authenticated_client):
+        """Test failed track addition with JSON error response."""
+        mock_response = Mock()
+        mock_response.json.return_value = {'error': 'Invalid track'}
+        
+        mock_exception = Exception("Add failed")
+        mock_exception.response = mock_response
+        
+        with patch.object(authenticated_client._session, 'post', side_effect=mock_exception):
+            result = authenticated_client.add_track('playlist_123', 456)
+        
+        assert result is False
+    
+    def test_add_track_failure_with_text_response(self, authenticated_client):
+        """Test failed track addition with text error response (JSON parsing fails)."""
+        mock_response = Mock()
+        mock_response.json.side_effect = Exception("JSON decode error")
+        mock_response.text = "Error text"
+        
+        mock_exception = Exception("Add failed")
+        mock_exception.response = mock_response
+        
+        with patch.object(authenticated_client._session, 'post', side_effect=mock_exception):
+            result = authenticated_client.add_track('playlist_123', 456)
+        
+        assert result is False
+    
     @patch.object(QobuzClient, '_make_request')
     def test_get_playlist_success(self, mock_request, authenticated_client):
         """Test successful playlist retrieval."""
