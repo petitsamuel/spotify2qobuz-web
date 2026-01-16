@@ -8,7 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, Optional
 
-from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
+from fastapi import FastAPI, Request, HTTPException, BackgroundTasks, Form
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -443,6 +443,28 @@ async def get_sync_status(task_id: str):
     raise HTTPException(status_code=404, detail="Task not found")
 
 
+@app.post("/api/qobuz/favorite")
+async def add_qobuz_favorite(qobuz_id: int = Form(...), spotify_id: str = Form(None)):
+    """Manually add a track to Qobuz favorites."""
+    auth_status = await get_auth_status()
+    if not auth_status["qobuz"]:
+        raise HTTPException(status_code=401, detail="Qobuz not connected")
+
+    creds = await storage.get_credentials("qobuz")
+    try:
+        client = QobuzClient(creds['user_auth_token'])
+        client.authenticate()
+        success = client.add_favorite_track(qobuz_id)
+
+        if success and spotify_id:
+            # Mark as synced so it won't appear in missing tracks next time
+            await storage.mark_track_synced(spotify_id, str(qobuz_id), "favorites")
+
+        return {"success": success, "qobuz_id": qobuz_id}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to add favorite: {e}")
+
+
 @app.get("/history", response_class=HTMLResponse)
 async def migration_history(request: Request):
     """Show migration history."""
@@ -502,13 +524,13 @@ async def get_qobuz_stats():
         all_playlists = client.list_user_playlists()
         playlist_count = len(all_playlists)
 
-        # Count playlists from Spotify (those with "[Spotify]" in name)
+        # Count playlists from Spotify (those with "(from Spotify)" in name)
         from_spotify = sum(1 for p in all_playlists
-                          if '[Spotify]' in p.get('name', ''))
+                          if '(from Spotify)' in p.get('name', '') or
+                             '[Spotify]' in p.get('name', ''))
 
-        # Get favorites count
-        favorites = client.get_favorite_tracks()
-        favorites_count = len(favorites)
+        # Get favorites count (fast - just gets total, doesn't fetch all)
+        favorites_count = client.get_favorites_count()
 
         return {
             "playlists": playlist_count,

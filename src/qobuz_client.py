@@ -384,13 +384,13 @@ class QobuzClient:
     def get_favorite_tracks(self, limit: int = 5000) -> List[int]:
         """
         Get all favorite/liked track IDs for the authenticated user.
-        
+
         Args:
             limit: Maximum number of favorites to retrieve (default: 5000)
-        
+
         Returns:
             List of track IDs that are favorited
-        
+
         Raises:
             Exception: If API call fails
         """
@@ -401,24 +401,44 @@ class QobuzClient:
                 "limit": limit,
                 "offset": 0
             }
-            
+
             response = self._session.get(url, params=params, timeout=30)
             response.raise_for_status()
-            
+
             data = response.json()
             track_ids = []
-            
+
             if 'tracks' in data and 'items' in data['tracks']:
                 for item in data['tracks']['items']:
                     if 'id' in item:
                         track_ids.append(item['id'])
-            
+
             logger.info(f"Retrieved {len(track_ids)} favorite tracks from Qobuz")
             return track_ids
-            
+
         except requests.exceptions.RequestException as e:
             logger.error(f"Failed to get favorite tracks: {e}")
             raise Exception(f"Failed to get favorite tracks: {e}")
+
+    def get_favorites_count(self) -> int:
+        """Get total count of favorite tracks without fetching all."""
+        try:
+            url = f"{self.BASE_URL}/favorite/getUserFavorites"
+            params = {
+                "type": "tracks",
+                "limit": 1,
+                "offset": 0
+            }
+
+            response = self._session.get(url, params=params, timeout=10)
+            response.raise_for_status()
+
+            data = response.json()
+            return data.get('tracks', {}).get('total', 0)
+
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Failed to get favorites count: {e}")
+            return 0
     
     def add_favorite_track(self, track_id: int) -> bool:
         """

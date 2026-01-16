@@ -300,9 +300,10 @@ class AsyncSyncService:
                 """Process a single track - runs in thread pool."""
                 track, spotify_id = item
                 if spotify_id in already_synced:
-                    return ('skipped', spotify_id, track, None)
-                match_result = self.matcher.match_track(track)
-                return ('matched' if match_result else 'not_matched', spotify_id, track, match_result)
+                    return ('skipped', spotify_id, track, None, [])
+                match_result, suggestions = self.matcher.match_track_with_suggestions(track)
+                status = 'matched' if match_result else 'not_matched'
+                return (status, spotify_id, track, match_result, suggestions)
 
             def process_batch(batch_items):
                 """Process a batch of tracks in parallel."""
@@ -358,7 +359,7 @@ class AsyncSyncService:
         on_track_synced: Callable
     ):
         """Process a batch of match results."""
-        for status, spotify_id, track, match_result in results:
+        for status, spotify_id, track, match_result, suggestions in results:
             if status == 'skipped':
                 report["tracks_skipped"] += 1
                 continue
@@ -395,5 +396,6 @@ class AsyncSyncService:
                     "spotify_id": spotify_id,
                     "title": track['title'],
                     "artist": track['artist'],
-                    "album": track['album']
+                    "album": track['album'],
+                    "suggestions": suggestions  # Include near-miss suggestions
                 })
