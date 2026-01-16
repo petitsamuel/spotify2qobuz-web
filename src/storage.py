@@ -59,6 +59,7 @@ class Storage:
                     completed_at TEXT,
                     status TEXT NOT NULL,
                     migration_type TEXT NOT NULL,
+                    dry_run INTEGER DEFAULT 0,
                     playlists_total INTEGER DEFAULT 0,
                     playlists_synced INTEGER DEFAULT 0,
                     tracks_matched INTEGER DEFAULT 0,
@@ -68,6 +69,12 @@ class Storage:
                     report_json TEXT
                 )
             """)
+
+            # Add dry_run column if it doesn't exist (migration for existing DBs)
+            try:
+                await db.execute("ALTER TABLE migrations ADD COLUMN dry_run INTEGER DEFAULT 0")
+            except Exception:
+                pass  # Column already exists
 
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS sync_tasks (
@@ -141,13 +148,13 @@ class Storage:
             await db.execute("DELETE FROM credentials WHERE service = ?", (service,))
             await db.commit()
 
-    async def create_migration(self, migration_type: str) -> int:
+    async def create_migration(self, migration_type: str, dry_run: bool = False) -> int:
         """Create a new migration record."""
         async with aiosqlite.connect(self.db_path) as db:
             cursor = await db.execute("""
-                INSERT INTO migrations (started_at, status, migration_type)
-                VALUES (?, ?, ?)
-            """, (datetime.now().isoformat(), "running", migration_type))
+                INSERT INTO migrations (started_at, status, migration_type, dry_run)
+                VALUES (?, ?, ?, ?)
+            """, (datetime.now().isoformat(), "running", migration_type, 1 if dry_run else 0))
             await db.commit()
             return cursor.lastrowid
 

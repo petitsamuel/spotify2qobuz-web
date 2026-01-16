@@ -311,7 +311,7 @@ async def start_sync(request: Request, background_tasks: BackgroundTasks):
 
     # Create task
     task_id = str(uuid.uuid4())
-    migration_id = await storage.create_migration(sync_type)
+    migration_id = await storage.create_migration(sync_type, dry_run=dry_run)
     await storage.create_task(task_id, migration_id)
 
     active_tasks[task_id] = {
@@ -342,6 +342,8 @@ async def run_sync_task(
     dry_run: bool
 ):
     """Run sync task in background."""
+    progress_saver_task = None
+
     try:
         active_tasks[task_id]["status"] = "running"
         await storage.update_task(task_id, "running")
@@ -367,6 +369,22 @@ async def run_sync_task(
             active_tasks[task_id]["progress"] = progress
 
         progress_callback = ProgressCallback(on_progress)
+
+        # Start background task to periodically save progress to migration table
+        async def save_progress_periodically():
+            while True:
+                await asyncio.sleep(2)  # Save every 2 seconds
+                progress = active_tasks.get(task_id, {}).get("progress", {})
+                if progress:
+                    await storage.update_migration(
+                        migration_id,
+                        tracks_matched=progress.get("tracks_matched", 0),
+                        tracks_not_matched=progress.get("tracks_not_matched", 0),
+                        isrc_matches=progress.get("isrc_matches", 0),
+                        fuzzy_matches=progress.get("fuzzy_matches", 0)
+                    )
+
+        progress_saver_task = asyncio.create_task(save_progress_periodically())
 
         # Run sync
         sync_service = AsyncSyncService(
@@ -398,7 +416,15 @@ async def run_sync_task(
                 dry_run=dry_run
             )
 
-        # Update storage
+        # Stop the progress saver
+        if progress_saver_task:
+            progress_saver_task.cancel()
+            try:
+                await progress_saver_task
+            except asyncio.CancelledError:
+                pass
+
+        # Update storage with final results
         await storage.update_migration(
             migration_id,
             completed_at=datetime.now().isoformat(),
@@ -415,6 +441,25 @@ async def run_sync_task(
         await storage.update_task(task_id, "completed", report)
 
     except Exception as e:
+        # Stop the progress saver on error
+        if progress_saver_task:
+            progress_saver_task.cancel()
+            try:
+                await progress_saver_task
+            except asyncio.CancelledError:
+                pass
+
+        # Save final progress before marking failed
+        progress = active_tasks.get(task_id, {}).get("progress", {})
+        if progress:
+            await storage.update_migration(
+                migration_id,
+                tracks_matched=progress.get("tracks_matched", 0),
+                tracks_not_matched=progress.get("tracks_not_matched", 0),
+                isrc_matches=progress.get("isrc_matches", 0),
+                fuzzy_matches=progress.get("fuzzy_matches", 0)
+            )
+
         active_tasks[task_id]["status"] = "failed"
         active_tasks[task_id]["error"] = str(e)
         await storage.update_task(task_id, "failed", {"error": str(e)})

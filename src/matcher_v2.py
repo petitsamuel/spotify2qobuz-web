@@ -7,6 +7,12 @@ from rapidfuzz import fuzz
 from src.qobuz_client import QobuzClient
 from src.utils.logger import get_logger
 
+# Optional: phonetic matching
+try:
+    import jellyfish
+    HAS_JELLYFISH = True
+except ImportError:
+    HAS_JELLYFISH = False
 
 logger = get_logger()
 
@@ -117,11 +123,12 @@ class TrackMatcherV2:
         # Sort by score
         scored_candidates.sort(key=lambda x: x['score'], reverse=True)
 
-        # Check for a good match
+        # Check for a good match (use dynamic duration tolerance)
+        duration_tolerance = self._get_duration_tolerance(spotify_track['duration'])
         if scored_candidates:
             best = scored_candidates[0]
             if (best['score'] >= self.MIN_COMBINED_SCORE and
-                best['duration_diff'] <= self.DURATION_TOLERANCE_MS):
+                best['duration_diff'] <= duration_tolerance):
                 logger.info(
                     f"Fuzzy match (score={best['score']:.1f}): "
                     f"{spotify_track['title']} by {spotify_track['artist']} "
@@ -219,6 +226,7 @@ class TrackMatcherV2:
         title = spotify_track['title']
         artist = spotify_track['artist']
         album = spotify_track.get('album', '')
+        duration_tolerance = self._get_duration_tolerance(spotify_track['duration'])
 
         # Strategy 1: Search with album name for disambiguation
         if album:
@@ -226,7 +234,7 @@ class TrackMatcherV2:
             for candidate in candidates:
                 score = self._score_candidate(spotify_track, candidate)
                 duration_diff = abs(spotify_track['duration'] - candidate['duration'])
-                if score >= 65 and duration_diff <= self.DURATION_TOLERANCE_MS:
+                if score >= 65 and duration_diff <= duration_tolerance:
                     logger.info(
                         f"Album-based match (score={score:.1f}): "
                         f"{title} by {artist} "
@@ -247,7 +255,7 @@ class TrackMatcherV2:
             for candidate in candidates:
                 score = self._score_candidate(spotify_track, candidate)
                 duration_diff = abs(spotify_track['duration'] - candidate['duration'])
-                if score >= 65 and duration_diff <= self.DURATION_TOLERANCE_MS:
+                if score >= 65 and duration_diff <= duration_tolerance:
                     logger.info(
                         f"Clean title match (score={score:.1f}): "
                         f"{title} by {artist} "
@@ -259,7 +267,26 @@ class TrackMatcherV2:
                         score=score
                     )
 
-        # Strategy 3: Title only search (for cases where artist name differs significantly)
+        # Strategy 3: Try with primary artist only (when there are featured artists)
+        primary_artist, featured = self._extract_featured_artists(artist)
+        if featured:  # Only try if there were featured artists
+            candidates = self._search_candidates(title, primary_artist)
+            for candidate in candidates:
+                score = self._score_candidate(spotify_track, candidate)
+                duration_diff = abs(spotify_track['duration'] - candidate['duration'])
+                if score >= 65 and duration_diff <= duration_tolerance:
+                    logger.info(
+                        f"Primary artist match (score={score:.1f}): "
+                        f"{title} by {artist} "
+                        f"-> {candidate['title']} by {candidate['artist']}"
+                    )
+                    return MatchResult(
+                        qobuz_track=candidate,
+                        match_type='fuzzy_primary',
+                        score=score
+                    )
+
+        # Strategy 4: Title only search (for cases where artist name differs significantly)
         candidates = self._search_candidates(title, "")
         for candidate in candidates:
             title_score = self._fuzzy_score(
@@ -317,7 +344,7 @@ class TrackMatcherV2:
     def _score_candidate(self, spotify_track: Dict, candidate: Dict) -> float:
         """
         Score a candidate track against the Spotify track.
-        Uses multiple fuzzy algorithms and weights.
+        Uses multiple fuzzy algorithms, featured artist matching, and weights.
         """
         spotify_title = self._normalize(spotify_track['title'])
         spotify_artist = self._normalize(spotify_track['artist'])
@@ -327,13 +354,41 @@ class TrackMatcherV2:
         # Calculate title scores with multiple algorithms
         title_score = self._fuzzy_score(spotify_title, candidate_title)
 
-        # Calculate artist scores
-        artist_score = self._fuzzy_score(spotify_artist, candidate_artist)
+        # Calculate artist scores - try multiple approaches
+        artist_scores = [self._fuzzy_score(spotify_artist, candidate_artist)]
+
+        # Extract and match featured artists separately
+        spotify_primary, spotify_featured = self._extract_featured_artists(spotify_track['artist'])
+        candidate_primary, candidate_featured = self._extract_featured_artists(candidate['artist'])
+
+        # Primary artist match
+        primary_score = self._fuzzy_score(
+            self._normalize(spotify_primary),
+            self._normalize(candidate_primary)
+        )
+        artist_scores.append(primary_score)
+
+        # Check if any featured artist matches
+        if spotify_featured or candidate_featured:
+            all_spotify_artists = [spotify_primary] + spotify_featured
+            all_candidate_artists = [candidate_primary] + candidate_featured
+
+            # Check if any artist from one appears in the other
+            for s_artist in all_spotify_artists:
+                for c_artist in all_candidate_artists:
+                    cross_score = self._fuzzy_score(
+                        self._normalize(s_artist),
+                        self._normalize(c_artist)
+                    )
+                    if cross_score > 80:
+                        artist_scores.append(cross_score)
 
         # Also check if artist appears in track title (common for features)
         artist_in_title = fuzz.partial_ratio(spotify_artist, candidate_title)
-        if artist_in_title > artist_score:
-            artist_score = (artist_score + artist_in_title) / 2
+        if artist_in_title > 70:
+            artist_scores.append(artist_in_title)
+
+        artist_score = max(artist_scores)
 
         # Combined score (title weighted more heavily)
         combined = (title_score * 0.6) + (artist_score * 0.4)
@@ -358,7 +413,63 @@ class TrackMatcherV2:
             fuzz.token_set_ratio(s1, s2),   # Handles subsets
             fuzz.partial_ratio(s1, s2),     # Handles partial matches
         ]
+
+        # Add phonetic matching if available (helps with spelling variations)
+        if HAS_JELLYFISH and s1 and s2:
+            try:
+                # Soundex comparison (good for names)
+                soundex1 = jellyfish.soundex(s1.split()[0]) if s1.split() else ""
+                soundex2 = jellyfish.soundex(s2.split()[0]) if s2.split() else ""
+                if soundex1 and soundex2 and soundex1 == soundex2:
+                    scores.append(85)  # Bonus for phonetic match
+
+                # Metaphone for more accuracy
+                meta1 = jellyfish.metaphone(s1)
+                meta2 = jellyfish.metaphone(s2)
+                if meta1 and meta2:
+                    meta_sim = fuzz.ratio(meta1, meta2)
+                    if meta_sim > 80:
+                        scores.append(meta_sim)
+            except Exception:
+                pass  # Phonetic matching is optional
+
         return max(scores)
+
+    def _extract_featured_artists(self, s: str) -> Tuple[str, List[str]]:
+        """
+        Extract primary artist and featured artists from artist string.
+        Returns (primary_artist, [featured_artists])
+        """
+        featured = []
+
+        # Match patterns like "Artist feat. Other" or "Artist (feat. Other)"
+        feat_match = re.search(
+            r'(.+?)\s*(?:feat\.?|ft\.?|featuring|with|&|,)\s*(.+)',
+            s, re.IGNORECASE
+        )
+
+        if feat_match:
+            primary = feat_match.group(1).strip()
+            others = feat_match.group(2)
+            # Split multiple featured artists
+            featured = [a.strip() for a in re.split(r'[,&]|feat\.?|ft\.?|and', others, flags=re.IGNORECASE) if a.strip()]
+            return primary, featured
+
+        return s, []
+
+    def _get_duration_tolerance(self, duration_ms: int) -> int:
+        """
+        Get dynamic duration tolerance based on track length.
+        Shorter songs need tighter matching, longer songs can be more lenient.
+        """
+        if duration_ms < 120000:  # < 2 min
+            return 3000  # 3 seconds
+        elif duration_ms < 240000:  # < 4 min
+            return 5000  # 5 seconds
+        elif duration_ms < 480000:  # < 8 min
+            return 10000  # 10 seconds
+        else:  # Long tracks (live, extended)
+            return 30000  # 30 seconds
 
     def _normalize(self, s: str) -> str:
         """

@@ -42,7 +42,10 @@
             <div class="flex items-center gap-3">
                 <div class="w-8 h-8 border-2 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
                 <div>
-                    <h2 class="font-semibold" x-text="syncType === 'favorites' ? 'Syncing Saved Tracks' : 'Syncing Playlists'"></h2>
+                    <div class="flex items-center gap-2">
+                        <h2 class="font-semibold" x-text="syncType === 'favorites' ? 'Syncing Saved Tracks' : 'Syncing Playlists'"></h2>
+                        <span x-show="dryRun" class="px-1.5 py-0.5 rounded text-xs bg-yellow-600/30 text-yellow-400">DRY RUN</span>
+                    </div>
                     <p class="text-sm text-gray-400" x-text="progress.current_playlist || 'Starting...'"></p>
                 </div>
             </div>
@@ -193,28 +196,41 @@
     </div>
 
     <!-- Quick Actions (when not syncing and not showing completion) -->
-    <div x-show="!syncing && !completed" class="grid md:grid-cols-2 gap-4">
-        <button @click="startSync('playlists')"
-                class="p-6 bg-gray-800 hover:bg-gray-750 rounded-lg border border-gray-700 hover:border-green-500 transition text-left group">
-            <div class="flex items-center justify-between mb-2">
-                <h3 class="text-lg font-semibold group-hover:text-green-400 transition">Sync All Playlists</h3>
-                <svg class="w-5 h-5 text-gray-500 group-hover:text-green-400 transition" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14 5l7 7m0 0l-7 7m7-7H3"></path>
-                </svg>
-            </div>
-            <p class="text-sm text-gray-400">Transfer all <span x-text="spotifyStats.playlists"></span> playlists to Qobuz</p>
-        </button>
+    <div x-show="!syncing && !completed" class="space-y-4">
+        <!-- Dry Run Toggle -->
+        <div class="flex items-center justify-end gap-3 px-2">
+            <label class="flex items-center gap-2 cursor-pointer">
+                <input type="checkbox" x-model="dryRun" class="w-4 h-4 rounded bg-gray-700 border-gray-600 text-blue-500 focus:ring-blue-500">
+                <span class="text-sm text-gray-400">Dry Run</span>
+                <span class="text-xs text-gray-500">(preview only, no changes)</span>
+            </label>
+        </div>
 
-        <button @click="startSync('favorites')"
-                class="p-6 bg-gray-800 hover:bg-gray-750 rounded-lg border border-gray-700 hover:border-blue-500 transition text-left group">
-            <div class="flex items-center justify-between mb-2">
-                <h3 class="text-lg font-semibold group-hover:text-blue-400 transition">Sync Saved Tracks</h3>
-                <svg class="w-5 h-5 text-gray-500 group-hover:text-blue-400 transition" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z"></path>
-                </svg>
-            </div>
-            <p class="text-sm text-gray-400">Transfer <span x-text="spotifyStats.savedTracks"></span> liked songs to Qobuz favorites</p>
-        </button>
+        <div class="grid md:grid-cols-2 gap-4">
+            <button @click="startSync('playlists')"
+                    class="p-6 bg-gray-800 hover:bg-gray-750 rounded-lg border border-gray-700 hover:border-green-500 transition text-left group">
+                <div class="flex items-center justify-between mb-2">
+                    <h3 class="text-lg font-semibold group-hover:text-green-400 transition">Sync All Playlists</h3>
+                    <svg class="w-5 h-5 text-gray-500 group-hover:text-green-400 transition" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14 5l7 7m0 0l-7 7m7-7H3"></path>
+                    </svg>
+                </div>
+                <p class="text-sm text-gray-400">Transfer all <span x-text="spotifyStats.playlists"></span> playlists to Qobuz</p>
+                <p x-show="dryRun" class="text-xs text-yellow-400 mt-1">Preview mode - no changes will be made</p>
+            </button>
+
+            <button @click="startSync('favorites')"
+                    class="p-6 bg-gray-800 hover:bg-gray-750 rounded-lg border border-gray-700 hover:border-blue-500 transition text-left group">
+                <div class="flex items-center justify-between mb-2">
+                    <h3 class="text-lg font-semibold group-hover:text-blue-400 transition">Sync Saved Tracks</h3>
+                    <svg class="w-5 h-5 text-gray-500 group-hover:text-blue-400 transition" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z"></path>
+                    </svg>
+                </div>
+                <p class="text-sm text-gray-400">Transfer <span x-text="spotifyStats.savedTracks"></span> liked songs to Qobuz favorites</p>
+                <p x-show="dryRun" class="text-xs text-yellow-400 mt-1">Preview mode - no changes will be made</p>
+            </button>
+        </div>
     </div>
 
     <!-- Library Overview -->
@@ -305,6 +321,9 @@
                         {{ migration.status }}
                     </span>
                     <span class="text-sm">{{ migration.migration_type | title }}</span>
+                    {% if migration.dry_run %}
+                    <span class="px-1.5 py-0.5 rounded text-xs bg-yellow-600/20 text-yellow-400">DRY RUN</span>
+                    {% endif %}
                     <span class="text-xs text-gray-500">{{ migration.started_at[:16].replace('T', ' ') }}</span>
                 </div>
                 <div class="flex items-center gap-4 text-sm">
@@ -334,6 +353,7 @@ function syncApp() {
         taskId: null,
         progress: {},
         finalReport: null,
+        dryRun: false,
         spotifyStats: { playlists: '...', savedTracks: '...' },
         qobuzStats: { playlists: '...', fromSpotify: '...', favorites: '...' },
 
@@ -408,6 +428,9 @@ function syncApp() {
 
             const formData = new FormData();
             formData.append('type', type);
+            if (this.dryRun) {
+                formData.append('dry_run', 'true');
+            }
 
             const res = await fetch('/sync/start', { method: 'POST', body: formData });
             const data = await res.json();
