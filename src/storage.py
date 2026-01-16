@@ -81,6 +81,26 @@ class Storage:
                 )
             """)
 
+            # Track synced tracks for resume support
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS synced_tracks (
+                    spotify_id TEXT PRIMARY KEY,
+                    qobuz_id TEXT,
+                    sync_type TEXT NOT NULL,
+                    synced_at TEXT NOT NULL
+                )
+            """)
+
+            # Track sync progress for resume
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS sync_progress (
+                    sync_type TEXT PRIMARY KEY,
+                    last_offset INTEGER DEFAULT 0,
+                    total_tracks INTEGER DEFAULT 0,
+                    updated_at TEXT NOT NULL
+                )
+            """)
+
             await db.commit()
 
     async def save_credentials(self, service: str, credentials: Dict):
@@ -214,3 +234,80 @@ class Storage:
                     result['progress'] = json.loads(result['progress_json'])
                 return result
             return None
+
+    # --- Synced track tracking for resume support ---
+
+    async def is_track_synced(self, spotify_id: str, sync_type: str) -> bool:
+        """Check if a track has already been synced."""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute(
+                "SELECT 1 FROM synced_tracks WHERE spotify_id = ? AND sync_type = ?",
+                (spotify_id, sync_type)
+            )
+            row = await cursor.fetchone()
+            return row is not None
+
+    async def mark_track_synced(self, spotify_id: str, qobuz_id: str, sync_type: str):
+        """Mark a track as synced."""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("""
+                INSERT OR REPLACE INTO synced_tracks (spotify_id, qobuz_id, sync_type, synced_at)
+                VALUES (?, ?, ?, ?)
+            """, (spotify_id, qobuz_id, sync_type, datetime.now().isoformat()))
+            await db.commit()
+
+    async def get_synced_track_ids(self, sync_type: str) -> set:
+        """Get all synced Spotify track IDs for a sync type."""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute(
+                "SELECT spotify_id FROM synced_tracks WHERE sync_type = ?",
+                (sync_type,)
+            )
+            rows = await cursor.fetchall()
+            return {row[0] for row in rows}
+
+    async def get_synced_count(self, sync_type: str) -> int:
+        """Get count of synced tracks for a sync type."""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute(
+                "SELECT COUNT(*) FROM synced_tracks WHERE sync_type = ?",
+                (sync_type,)
+            )
+            row = await cursor.fetchone()
+            return row[0] if row else 0
+
+    async def clear_synced_tracks(self, sync_type: str):
+        """Clear synced tracks for a fresh sync."""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("DELETE FROM synced_tracks WHERE sync_type = ?", (sync_type,))
+            await db.commit()
+
+    # --- Sync progress tracking ---
+
+    async def save_sync_progress(self, sync_type: str, last_offset: int, total_tracks: int):
+        """Save sync progress for resume."""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("""
+                INSERT OR REPLACE INTO sync_progress (sync_type, last_offset, total_tracks, updated_at)
+                VALUES (?, ?, ?, ?)
+            """, (sync_type, last_offset, total_tracks, datetime.now().isoformat()))
+            await db.commit()
+
+    async def get_sync_progress(self, sync_type: str) -> Optional[Dict]:
+        """Get sync progress for resume."""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                "SELECT * FROM sync_progress WHERE sync_type = ?",
+                (sync_type,)
+            )
+            row = await cursor.fetchone()
+            if row:
+                return dict(row)
+            return None
+
+    async def clear_sync_progress(self, sync_type: str):
+        """Clear sync progress."""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("DELETE FROM sync_progress WHERE sync_type = ?", (sync_type,))
+            await db.commit()

@@ -82,6 +82,12 @@ class AsyncSyncService:
         self.matcher = TrackMatcher(qobuz_client)
         self.progress = progress_callback or ProgressCallback()
         self._executor = ThreadPoolExecutor(max_workers=1)
+        self._cancelled = False
+
+    def cancel(self):
+        """Cancel the running sync."""
+        self._cancelled = True
+        logger.info("Sync cancellation requested")
 
     async def sync_playlists(
         self,
@@ -218,43 +224,83 @@ class AsyncSyncService:
                     "album": track['album']
                 })
 
-    async def sync_favorites(self, dry_run: bool = False) -> Dict:
-        """Sync saved tracks from Spotify to Qobuz favorites."""
+    async def sync_favorites(
+        self,
+        dry_run: bool = False,
+        already_synced: set = None,
+        on_track_synced: Callable = None
+    ) -> Dict:
+        """
+        Sync saved tracks from Spotify to Qobuz favorites.
+
+        Args:
+            dry_run: If True, don't make any changes
+            already_synced: Set of Spotify track IDs that are already synced (for resume)
+            on_track_synced: Callback(spotify_id, qobuz_id) called after each track is synced
+        """
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(
             self._executor,
-            self._sync_favorites_sync,
-            dry_run
+            self._sync_favorites_streaming,
+            dry_run,
+            already_synced or set(),
+            on_track_synced
         )
 
-    def _sync_favorites_sync(self, dry_run: bool) -> Dict:
-        """Synchronous implementation of favorites sync."""
+    def _sync_favorites_streaming(
+        self,
+        dry_run: bool,
+        already_synced: set,
+        on_track_synced: Callable
+    ) -> Dict:
+        """Streaming implementation of favorites sync - processes as it goes."""
         report = {
             "started_at": datetime.now().isoformat(),
             "completed_at": None,
             "tracks_matched": 0,
             "tracks_not_matched": 0,
+            "tracks_skipped": 0,
             "isrc_matches": 0,
             "fuzzy_matches": 0,
             "missing_tracks": [],
+            "synced_tracks": [],
             "errors": []
         }
 
         try:
-            spotify_tracks = self.spotify_client.get_saved_tracks()
-            self.progress.update(
-                total_playlists=1,
-                current_playlist="Saved Tracks",
-                current_playlist_index=1,
-                total_tracks=len(spotify_tracks)
-            )
-
+            # Get existing Qobuz favorites once
             existing_favorites = set()
             if not dry_run:
                 existing_favorites = set(self.qobuz_client.get_favorite_tracks())
 
-            for i, track in enumerate(spotify_tracks):
-                self.progress.update(current_track_index=i + 1)
+            self.progress.update(
+                total_playlists=1,
+                current_playlist="Saved Tracks",
+                current_playlist_index=1,
+                total_tracks=0  # Will be updated on first batch
+            )
+
+            track_index = 0
+
+            # Stream tracks from Spotify - process as we go
+            for track, spotify_id, offset, total in self.spotify_client.iter_saved_tracks():
+                # Check for cancellation
+                if self._cancelled:
+                    logger.info("Sync cancelled by user")
+                    report["errors"].append("Cancelled by user")
+                    break
+
+                # Update total on first iteration
+                if track_index == 0:
+                    self.progress.update(total_tracks=total)
+
+                track_index += 1
+                self.progress.update(current_track_index=track_index)
+
+                # Skip if already synced (resume support)
+                if spotify_id in already_synced:
+                    report["tracks_skipped"] += 1
+                    continue
 
                 match_result = self.matcher.match_track(track)
 
@@ -269,14 +315,27 @@ class AsyncSyncService:
                         report["fuzzy_matches"] += 1
                         self.progress.update(fuzzy_matches=report["fuzzy_matches"])
 
+                    qobuz_track_id = match_result.qobuz_track['id']
+
                     if not dry_run:
-                        qobuz_track_id = match_result.qobuz_track['id']
                         if qobuz_track_id not in existing_favorites:
                             self.qobuz_client.add_favorite_track(qobuz_track_id)
+                            existing_favorites.add(qobuz_track_id)
+
+                        # Track this sync for resume support
+                        report["synced_tracks"].append({
+                            "spotify_id": spotify_id,
+                            "qobuz_id": str(qobuz_track_id)
+                        })
+
+                        # Callback to persist progress
+                        if on_track_synced:
+                            on_track_synced(spotify_id, str(qobuz_track_id))
                 else:
                     report["tracks_not_matched"] += 1
                     self.progress.update(tracks_not_matched=report["tracks_not_matched"])
                     report["missing_tracks"].append({
+                        "spotify_id": spotify_id,
                         "title": track['title'],
                         "artist": track['artist'],
                         "album": track['album']

@@ -373,7 +373,22 @@ async def run_sync_task(
         )
 
         if sync_type == "favorites":
-            report = await sync_service.sync_favorites(dry_run=dry_run)
+            # Load already synced tracks for resume support
+            already_synced = await storage.get_synced_track_ids("favorites")
+
+            report = await sync_service.sync_favorites(
+                dry_run=dry_run,
+                already_synced=already_synced
+            )
+
+            # Persist newly synced tracks for resume
+            if not dry_run:
+                for synced in report.get("synced_tracks", []):
+                    await storage.mark_track_synced(
+                        synced["spotify_id"],
+                        synced["qobuz_id"],
+                        "favorites"
+                    )
         else:
             report = await sync_service.sync_playlists(
                 playlist_ids=playlist_ids,

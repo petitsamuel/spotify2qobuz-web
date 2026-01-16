@@ -211,3 +211,63 @@ class SpotifyClient:
         
         logger.info(f"Retrieved {len(tracks)} saved tracks from Spotify")
         return tracks
+
+    def iter_saved_tracks(self, start_offset: int = 0):
+        """
+        Generator that yields saved tracks one at a time with pagination.
+
+        This is more memory-efficient than get_saved_tracks() and allows
+        processing tracks as they're fetched.
+
+        Args:
+            start_offset: Starting offset for resuming interrupted syncs
+
+        Yields:
+            Tuple of (track_dict, spotify_id, current_offset, total_tracks)
+        """
+        if not self.sp:
+            raise Exception("Not authenticated. Call authenticate_user() first.")
+
+        offset = start_offset
+        limit = 50
+        total = None
+
+        while True:
+            results = self.sp.current_user_saved_tracks(
+                limit=limit,
+                offset=offset
+            )
+
+            if total is None:
+                total = results.get('total', 0)
+                logger.info(f"Streaming {total} saved tracks from Spotify (starting at {start_offset})")
+
+            for item in results['items']:
+                track_data = item.get('track')
+                if not track_data:
+                    continue
+
+                # Extract ISRC if available
+                isrc = None
+                external_ids = track_data.get('external_ids', {})
+                if external_ids and 'isrc' in external_ids:
+                    isrc = external_ids['isrc']
+
+                # Get primary artist
+                artist = track_data['artists'][0]['name'] if track_data['artists'] else "Unknown"
+
+                spotify_id = track_data['id']
+                track = {
+                    'id': spotify_id,
+                    'title': track_data['name'],
+                    'artist': artist,
+                    'album': track_data['album']['name'],
+                    'duration': track_data['duration_ms'],
+                    'isrc': isrc
+                }
+                yield track, spotify_id, offset, total
+
+            if not results['next']:
+                break
+
+            offset += limit
