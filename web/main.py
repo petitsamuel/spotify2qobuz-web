@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Dict, Optional
 
 from fastapi import FastAPI, Request, HTTPException, BackgroundTasks, Form
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -961,6 +961,211 @@ async def compare_albums():
         "missing_from_qobuz": only_spotify[:100],
         "extra_in_qobuz": only_qobuz[:100]
     }
+
+
+@app.get("/api/compare/stream/{compare_type}")
+async def compare_stream(compare_type: str):
+    """Stream comparison results via SSE for progressive loading."""
+    import json
+    from rapidfuzz import fuzz
+
+    if compare_type not in ["favorites", "albums"]:
+        raise HTTPException(status_code=400, detail="Invalid comparison type")
+
+    auth_status = await get_auth_status()
+    if not auth_status["both_connected"]:
+        raise HTTPException(status_code=400, detail="Both services must be connected")
+
+    qobuz_creds = await storage.get_credentials("qobuz")
+    spotify_client = await get_authenticated_spotify_client()
+    qobuz_client = QobuzClient(qobuz_creds['user_auth_token'])
+    qobuz_client.authenticate()
+
+    async def generate():
+        def send(event: str, data: dict):
+            return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+
+        def normalize(s):
+            return s.lower().strip() if s else ""
+
+        try:
+            # Phase 1: Fetch Qobuz data first (usually faster)
+            yield send("status", {"phase": "qobuz", "message": "Fetching Qobuz library..."})
+
+            qobuz_items = []
+            qobuz_by_id_code = {}  # ISRC or UPC lookup
+
+            if compare_type == "favorites":
+                url = f"{qobuz_client.BASE_URL}/favorite/getUserFavorites"
+                params = {"type": "tracks", "limit": 5000}
+                response = qobuz_client._session.get(url, params=params, timeout=60)
+                response.raise_for_status()
+                data = response.json()
+
+                if 'tracks' in data and 'items' in data['tracks']:
+                    for item in data['tracks']['items']:
+                        track = {
+                            "id": item['id'],
+                            "title": item.get('title', ''),
+                            "artist": item.get('performer', {}).get('name', ''),
+                            "album": item.get('album', {}).get('title', ''),
+                            "isrc": item.get('isrc')
+                        }
+                        qobuz_items.append(track)
+                        if track.get('isrc'):
+                            qobuz_by_id_code[track['isrc']] = track
+            else:  # albums
+                url = f"{qobuz_client.BASE_URL}/favorite/getUserFavorites"
+                params = {"type": "albums", "limit": 5000}
+                response = qobuz_client._session.get(url, params=params, timeout=60)
+                response.raise_for_status()
+                data = response.json()
+
+                if 'albums' in data and 'items' in data['albums']:
+                    for item in data['albums']['items']:
+                        album = {
+                            "id": item['id'],
+                            "title": item.get('title', ''),
+                            "artist": item.get('artist', {}).get('name', ''),
+                            "upc": item.get('upc')
+                        }
+                        qobuz_items.append(album)
+                        if album.get('upc'):
+                            qobuz_by_id_code[album['upc']] = album
+
+            # Build fuzzy lookup index: normalized "title|artist" -> qobuz item
+            qobuz_fuzzy_index = {}
+            for item in qobuz_items:
+                key = f"{normalize(item['title'])}|{normalize(item['artist'])}"
+                qobuz_fuzzy_index[key] = item
+
+            yield send("qobuz_loaded", {"count": len(qobuz_items)})
+
+            # Phase 2: Stream through Spotify items
+            yield send("status", {"phase": "spotify", "message": "Comparing with Spotify library..."})
+
+            matched_count = 0
+            only_spotify_count = 0
+            matched_qobuz_ids = set()
+            spotify_total = 0
+
+            matched_items = []
+            missing_items = []
+
+            if compare_type == "favorites":
+                iterator = spotify_client.iter_saved_tracks()
+            else:
+                iterator = spotify_client.iter_saved_albums()
+
+            batch_size = 50
+            processed = 0
+
+            for item_data in iterator:
+                if compare_type == "favorites":
+                    item, spotify_id, offset, total = item_data
+                    spotify_item = {
+                        "id": spotify_id,
+                        "title": item['title'],
+                        "artist": item['artist'],
+                        "album": item.get('album', ''),
+                        "isrc": item.get('isrc')
+                    }
+                    id_code = spotify_item.get('isrc')
+                else:
+                    item, spotify_id, offset, total = item_data
+                    spotify_item = {
+                        "id": spotify_id,
+                        "title": item['title'],
+                        "artist": item['artist'],
+                        "upc": item.get('upc')
+                    }
+                    id_code = spotify_item.get('upc')
+
+                spotify_total = total
+                processed += 1
+
+                # Try exact ID match first (ISRC/UPC)
+                if id_code and id_code in qobuz_by_id_code:
+                    qobuz_item = qobuz_by_id_code[id_code]
+                    matched_count += 1
+                    matched_qobuz_ids.add(qobuz_item['id'])
+                    matched_items.append({
+                        "spotify": spotify_item,
+                        "qobuz": qobuz_item,
+                        "match_type": "isrc" if compare_type == "favorites" else "upc"
+                    })
+                else:
+                    # Try fuzzy match using index
+                    key = f"{normalize(spotify_item['title'])}|{normalize(spotify_item['artist'])}"
+                    if key in qobuz_fuzzy_index:
+                        qobuz_item = qobuz_fuzzy_index[key]
+                        if qobuz_item['id'] not in matched_qobuz_ids:
+                            matched_count += 1
+                            matched_qobuz_ids.add(qobuz_item['id'])
+                            matched_items.append({
+                                "spotify": spotify_item,
+                                "qobuz": qobuz_item,
+                                "match_type": "fuzzy",
+                                "score": 100
+                            })
+                        else:
+                            only_spotify_count += 1
+                            missing_items.append(spotify_item)
+                    else:
+                        # Fallback: slower fuzzy search for close matches
+                        best_match = None
+                        best_score = 0
+                        for qobuz_item in qobuz_items[:500]:  # Limit search for performance
+                            if qobuz_item['id'] in matched_qobuz_ids:
+                                continue
+                            title_score = fuzz.ratio(normalize(spotify_item['title']), normalize(qobuz_item['title']))
+                            artist_score = fuzz.ratio(normalize(spotify_item['artist']), normalize(qobuz_item['artist']))
+                            combined = (title_score + artist_score) / 2
+                            if combined > best_score and combined >= 85:
+                                best_score = combined
+                                best_match = qobuz_item
+
+                        if best_match:
+                            matched_count += 1
+                            matched_qobuz_ids.add(best_match['id'])
+                            matched_items.append({
+                                "spotify": spotify_item,
+                                "qobuz": best_match,
+                                "match_type": "fuzzy",
+                                "score": round(best_score, 1)
+                            })
+                        else:
+                            only_spotify_count += 1
+                            missing_items.append(spotify_item)
+
+                # Send progress updates in batches
+                if processed % batch_size == 0:
+                    yield send("progress", {
+                        "processed": processed,
+                        "total": spotify_total,
+                        "matched": matched_count,
+                        "missing": only_spotify_count
+                    })
+
+            # Calculate only_qobuz
+            only_qobuz = [item for item in qobuz_items if item['id'] not in matched_qobuz_ids]
+
+            # Send final results
+            yield send("complete", {
+                "matched": matched_count,
+                "only_spotify": only_spotify_count,
+                "only_qobuz": len(only_qobuz),
+                "spotify_total": spotify_total,
+                "qobuz_total": len(qobuz_items),
+                "matched_items": matched_items[:100],
+                "missing_from_qobuz": missing_items[:100],
+                "extra_in_qobuz": only_qobuz[:100]
+            })
+
+        except Exception as e:
+            yield send("error", {"message": str(e)})
+
+    return StreamingResponse(generate(), media_type="text/event-stream")
 
 
 @app.get("/api/spotify/stats")

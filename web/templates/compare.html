@@ -26,20 +26,40 @@
     <div class="flex items-center gap-4 border-b border-gray-700 pb-4">
         <button @click="tab = 'favorites'; loadComparison('favorites')"
                 :class="tab === 'favorites' ? 'bg-blue-600 text-white' : 'bg-gray-700 hover:bg-gray-600 text-gray-300'"
-                class="px-4 py-2 rounded-lg text-sm transition">
+                class="px-4 py-2 rounded-lg text-sm transition"
+                :disabled="loading">
             Saved Tracks
         </button>
         <button @click="tab = 'albums'; loadComparison('albums')"
                 :class="tab === 'albums' ? 'bg-purple-600 text-white' : 'bg-gray-700 hover:bg-gray-600 text-gray-300'"
-                class="px-4 py-2 rounded-lg text-sm transition">
+                class="px-4 py-2 rounded-lg text-sm transition"
+                :disabled="loading">
             Albums
         </button>
     </div>
 
-    <!-- Loading State -->
-    <div x-show="loading" class="flex items-center justify-center py-12">
-        <div class="w-8 h-8 border-2 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
-        <span class="ml-3 text-gray-400">Fetching and comparing libraries...</span>
+    <!-- Loading State with Progress -->
+    <div x-show="loading" class="space-y-4">
+        <div class="flex items-center justify-center py-4">
+            <div class="w-6 h-6 border-2 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
+            <span class="ml-3 text-gray-400" x-text="statusMessage"></span>
+        </div>
+
+        <!-- Progress bar -->
+        <div x-show="progress.total > 0" class="space-y-2">
+            <div class="flex justify-between text-sm text-gray-400">
+                <span>Comparing tracks...</span>
+                <span x-text="`${progress.processed} / ${progress.total}`"></span>
+            </div>
+            <div class="w-full bg-gray-700 rounded-full h-2">
+                <div class="bg-blue-500 h-2 rounded-full transition-all duration-300"
+                     :style="`width: ${(progress.processed / progress.total) * 100}%`"></div>
+            </div>
+            <div class="flex gap-4 text-sm">
+                <span class="text-green-400" x-text="`${progress.matched} matched`"></span>
+                <span class="text-yellow-400" x-text="`${progress.missing} missing`"></span>
+            </div>
+        </div>
     </div>
 
     <!-- Error State -->
@@ -114,11 +134,11 @@
 
         <!-- Matched Items -->
         <div x-show="section === 'matched'" class="space-y-2">
-            <div x-show="data.matched_tracks && data.matched_tracks.length === 0 && data.matched_albums && data.matched_albums.length === 0"
+            <div x-show="data.matched_items && data.matched_items.length === 0"
                  class="text-center py-8 text-gray-500">
                 No matched items found.
             </div>
-            <template x-for="item in (data.matched_tracks || data.matched_albums)" :key="item.spotify.id">
+            <template x-for="item in data.matched_items" :key="item.spotify.id">
                 <div class="bg-green-900/10 border border-green-600/20 rounded-lg p-3">
                     <div class="flex items-center">
                         <div class="flex-1">
@@ -169,29 +189,69 @@ function compareApp() {
         loading: false,
         error: null,
         data: null,
+        statusMessage: 'Loading...',
+        progress: { processed: 0, total: 0, matched: 0, missing: 0 },
+        eventSource: null,
 
         init() {
             this.loadComparison('favorites');
         },
 
-        async loadComparison(type) {
+        loadComparison(type) {
+            // Close existing connection
+            if (this.eventSource) {
+                this.eventSource.close();
+            }
+
             this.loading = true;
             this.error = null;
             this.data = null;
             this.section = 'missing';
+            this.statusMessage = 'Connecting...';
+            this.progress = { processed: 0, total: 0, matched: 0, missing: 0 };
 
-            try {
-                const res = await fetch(`/api/compare/${type}`);
-                if (!res.ok) {
-                    const err = await res.json();
-                    throw new Error(err.detail || 'Failed to compare');
-                }
-                this.data = await res.json();
-            } catch (e) {
-                this.error = e.message;
-            } finally {
+            this.eventSource = new EventSource(`/api/compare/stream/${type}`);
+
+            this.eventSource.addEventListener('status', (e) => {
+                const data = JSON.parse(e.data);
+                this.statusMessage = data.message;
+            });
+
+            this.eventSource.addEventListener('qobuz_loaded', (e) => {
+                const data = JSON.parse(e.data);
+                this.statusMessage = `Loaded ${data.count} items from Qobuz, comparing...`;
+            });
+
+            this.eventSource.addEventListener('progress', (e) => {
+                const data = JSON.parse(e.data);
+                this.progress = data;
+            });
+
+            this.eventSource.addEventListener('complete', (e) => {
+                const data = JSON.parse(e.data);
+                this.data = data;
                 this.loading = false;
-            }
+                this.eventSource.close();
+            });
+
+            this.eventSource.addEventListener('error', (e) => {
+                if (e.data) {
+                    const data = JSON.parse(e.data);
+                    this.error = data.message;
+                } else {
+                    this.error = 'Connection lost';
+                }
+                this.loading = false;
+                this.eventSource.close();
+            });
+
+            this.eventSource.onerror = () => {
+                if (this.loading && !this.data) {
+                    this.error = 'Connection failed';
+                    this.loading = false;
+                }
+                this.eventSource.close();
+            };
         }
     };
 }
