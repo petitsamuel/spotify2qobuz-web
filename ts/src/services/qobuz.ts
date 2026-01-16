@@ -436,34 +436,30 @@ export class QobuzClient {
 
   /**
    * Get all user playlists.
+   * Throws on error to prevent incorrect sync behavior.
    */
   async listUserPlaylists(): Promise<QobuzPlaylist[]> {
-    try {
-      const data = await this.request<{
-        playlists?: { items?: Array<{
-          id: number;
-          name: string;
-          tracks_count?: number;
-        }> };
-      }>('playlist/getUserPlaylists', { limit: 500 });
+    const data = await this.request<{
+      playlists?: { items?: Array<{
+        id: number;
+        name: string;
+        tracks_count?: number;
+      }> };
+    }>('playlist/getUserPlaylists', { limit: 500 });
 
-      const playlists: QobuzPlaylist[] = [];
-      if (data.playlists?.items) {
-        for (const item of data.playlists.items) {
-          playlists.push({
-            id: String(item.id),
-            name: item.name,
-            tracks_count: item.tracks_count || 0,
-          });
-        }
+    const playlists: QobuzPlaylist[] = [];
+    if (data.playlists?.items) {
+      for (const item of data.playlists.items) {
+        playlists.push({
+          id: String(item.id),
+          name: item.name,
+          tracks_count: item.tracks_count || 0,
+        });
       }
-
-      logger.info(`Found ${playlists.length} Qobuz playlists`);
-      return playlists;
-    } catch (error) {
-      logger.error(`Error listing user playlists: ${error}`);
-      return [];
     }
+
+    logger.info(`Found ${playlists.length} Qobuz playlists`);
+    return playlists;
   }
 
   /**
@@ -480,40 +476,36 @@ export class QobuzClient {
 
   /**
    * Get all track IDs in a playlist.
+   * Throws on error to prevent incorrect sync behavior (missing track deduplication).
    */
   async getPlaylistTracks(playlistId: string): Promise<number[]> {
-    try {
-      const trackIds: number[] = [];
-      let offset = 0;
-      const limit = 500;
+    const trackIds: number[] = [];
+    let offset = 0;
+    const limit = 500;
 
-      while (true) {
-        const data = await this.request<{
-          tracks?: {
-            items?: Array<{ id: number }>;
-            total?: number;
-          };
-        }>('playlist/get', { playlist_id: playlistId, extra: 'tracks', limit, offset });
+    while (true) {
+      const data = await this.request<{
+        tracks?: {
+          items?: Array<{ id: number }>;
+          total?: number;
+        };
+      }>('playlist/get', { playlist_id: playlistId, extra: 'tracks', limit, offset });
 
-        if (!data.tracks) break;
+      if (!data.tracks) break;
 
-        const items = data.tracks.items || [];
-        if (items.length === 0) break;
+      const items = data.tracks.items || [];
+      if (items.length === 0) break;
 
-        trackIds.push(...items.map(t => t.id));
+      trackIds.push(...items.map(t => t.id));
 
-        const total = data.tracks.total || 0;
-        if (trackIds.length >= total) break;
+      const total = data.tracks.total || 0;
+      if (trackIds.length >= total) break;
 
-        offset += limit;
-      }
-
-      logger.debug(`Found ${trackIds.length} tracks in playlist ${playlistId}`);
-      return trackIds;
-    } catch (error) {
-      logger.error(`Error getting playlist tracks ${playlistId}: ${error}`);
-      return [];
+      offset += limit;
     }
+
+    logger.debug(`Found ${trackIds.length} tracks in playlist ${playlistId}`);
+    return trackIds;
   }
 
   /**
@@ -547,6 +539,7 @@ export class QobuzClient {
 
   /**
    * Get favorites count.
+   * Returns -1 on error to distinguish from legitimate zero count.
    */
   async getFavoritesCount(): Promise<number> {
     try {
@@ -555,13 +548,16 @@ export class QobuzClient {
         { headers: this.headers, signal: AbortSignal.timeout(10000) }
       );
 
-      if (!response.ok) return 0;
+      if (!response.ok) {
+        logger.error(`Failed to get favorites count: HTTP ${response.status}`);
+        return -1;
+      }
 
       const data = await response.json();
       return data.tracks?.total || 0;
     } catch (error) {
       logger.error(`Failed to get favorites count: ${error}`);
-      return 0;
+      return -1;
     }
   }
 
@@ -766,6 +762,7 @@ export class QobuzClient {
 
   /**
    * Get favorite albums count.
+   * Returns -1 on error to distinguish from legitimate zero count.
    */
   async getFavoriteAlbumsCount(): Promise<number> {
     try {
@@ -774,13 +771,16 @@ export class QobuzClient {
         { headers: this.headers, signal: AbortSignal.timeout(10000) }
       );
 
-      if (!response.ok) return 0;
+      if (!response.ok) {
+        logger.error(`Failed to get favorite albums count: HTTP ${response.status}`);
+        return -1;
+      }
 
       const data = await response.json();
       return data.albums?.total || 0;
     } catch (error) {
       logger.error(`Failed to get favorite albums count: ${error}`);
-      return 0;
+      return -1;
     }
   }
 
@@ -873,6 +873,7 @@ export class QobuzClient {
 
   /**
    * Get stats for the Qobuz library.
+   * Returns -1 for any stat that couldn't be fetched due to errors.
    */
   async getStats(): Promise<{
     playlists: number;
@@ -880,18 +881,28 @@ export class QobuzClient {
     favorites: number;
     favoriteAlbums: number;
   }> {
-    const [playlists, favoritesCount, favoriteAlbumsCount] = await Promise.all([
-      this.listUserPlaylists(),
+    // Fetch all stats, catching errors for each independently
+    let playlists: QobuzPlaylist[] = [];
+    let playlistsError = false;
+
+    try {
+      playlists = await this.listUserPlaylists();
+    } catch (error) {
+      logger.error(`Failed to get playlists for stats: ${error}`);
+      playlistsError = true;
+    }
+
+    const [favoritesCount, favoriteAlbumsCount] = await Promise.all([
       this.getFavoritesCount(),
       this.getFavoriteAlbumsCount(),
     ]);
 
-    const fromSpotify = playlists.filter(
+    const fromSpotify = playlistsError ? -1 : playlists.filter(
       p => p.name.includes('(from Spotify)') || p.name.includes('[Spotify]')
     ).length;
 
     return {
-      playlists: playlists.length,
+      playlists: playlistsError ? -1 : playlists.length,
       fromSpotify,
       favorites: favoritesCount,
       favoriteAlbums: favoriteAlbumsCount,

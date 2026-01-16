@@ -43,6 +43,52 @@ const app = new Hono();
 // Middleware
 app.use('*', honoLogger());
 
+// Database readiness middleware - block requests if DB failed to initialize
+app.use('*', async (c, next) => {
+  // Allow health check and static files through always
+  if (c.req.path === '/health' || c.req.path.startsWith('/static/')) {
+    return next();
+  }
+
+  // If database initialization failed, return 503
+  if (dbInitError) {
+    logger.error(`Request blocked due to database error: ${c.req.path}`);
+    return c.json({
+      error: 'Service unavailable',
+      message: 'Database initialization failed. Please check server logs.',
+    }, 503);
+  }
+
+  // If still initializing, wait briefly then check again
+  if (!dbInitialized) {
+    // Wait up to 10 seconds for initialization
+    const maxWait = 10000;
+    const checkInterval = 100;
+    let waited = 0;
+
+    while (!dbInitialized && !dbInitError && waited < maxWait) {
+      await new Promise(resolve => setTimeout(resolve, checkInterval));
+      waited += checkInterval;
+    }
+
+    if (dbInitError) {
+      return c.json({
+        error: 'Service unavailable',
+        message: 'Database initialization failed. Please check server logs.',
+      }, 503);
+    }
+
+    if (!dbInitialized) {
+      return c.json({
+        error: 'Service starting',
+        message: 'Database is still initializing. Please retry shortly.',
+      }, 503);
+    }
+  }
+
+  return next();
+});
+
 // Static files
 app.use('/static/*', serveStatic({ root: './' }));
 
@@ -62,11 +108,28 @@ async function getAuthStatus(storage: Storage): Promise<{ spotify: boolean; qobu
 function renderTemplate(name: string, data: Record<string, unknown>): string {
   const templatePath = join(import.meta.dir, '..', 'views', `${name}.ejs`);
   if (!existsSync(templatePath)) {
-    return `Template not found: ${name}`;
+    logger.error(`Template not found: ${templatePath}`);
+    throw new Error(`Template not found: ${name}`);
   }
   const template = readFileSync(templatePath, 'utf-8');
   return ejs.render(template, data, { filename: templatePath });
 }
+
+// Global error handler for unhandled errors
+app.onError((err, c) => {
+  logger.error(`Unhandled error: ${err.message}`);
+  return c.html(`
+    <!DOCTYPE html>
+    <html>
+    <head><title>Error</title></head>
+    <body style="font-family: system-ui; padding: 2rem; background: #1a1a2e; color: #eee;">
+      <h1>Something went wrong</h1>
+      <p>${err.message}</p>
+      <a href="/" style="color: #6366f1;">Go back home</a>
+    </body>
+    </html>
+  `, 500);
+});
 
 // Page routes
 app.get('/', async (c) => {
@@ -138,8 +201,10 @@ app.get('/health', async (c) => {
 
   try {
     await Promise.race([dbReady, timeout]);
-  } catch {
-    // Timeout or error - continue to report status
+  } catch (error) {
+    // Log timeout/error but continue to report current status
+    const message = error instanceof Error ? error.message : 'unknown error';
+    logger.debug(`Health check db wait: ${message}`);
   }
 
   if (dbInitError) {
