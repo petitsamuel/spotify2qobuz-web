@@ -136,36 +136,58 @@
             <span class="text-4xl font-bold" :class="matchRateColor" x-text="matchRate.toFixed(1) + '%'"></span>
         </div>
 
-        <!-- Missing Tracks -->
+        <!-- Missing Tracks with Suggestions -->
         <div x-show="missingTracks.length > 0" class="mt-4">
             <button @click="showMissing = !showMissing"
                     class="w-full flex items-center justify-between bg-gray-800/50 rounded-lg p-3 hover:bg-gray-800 transition">
                 <span class="text-yellow-400 font-medium">
                     <span x-text="missingTracks.length"></span> tracks not found on Qobuz
+                    <span class="text-gray-400 text-sm ml-2">(click to review suggestions)</span>
                 </span>
                 <svg class="w-5 h-5 text-gray-400 transition-transform" :class="showMissing ? 'rotate-180' : ''" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>
                 </svg>
             </button>
-            <div x-show="showMissing" x-collapse class="mt-2 bg-gray-800/30 rounded-lg max-h-64 overflow-y-auto">
-                <table class="w-full text-sm">
-                    <thead class="text-gray-400 border-b border-gray-700 sticky top-0 bg-gray-800">
-                        <tr>
-                            <th class="text-left p-2">Title</th>
-                            <th class="text-left p-2">Artist</th>
-                            <th class="text-left p-2">Album</th>
-                        </tr>
-                    </thead>
-                    <tbody class="divide-y divide-gray-700/50">
-                        <template x-for="track in missingTracks" :key="track.spotify_id || track.title">
-                            <tr class="hover:bg-gray-700/30">
-                                <td class="p-2 text-white" x-text="track.title"></td>
-                                <td class="p-2 text-gray-300" x-text="track.artist"></td>
-                                <td class="p-2 text-gray-400 text-xs" x-text="track.album"></td>
-                            </tr>
-                        </template>
-                    </tbody>
-                </table>
+            <div x-show="showMissing" class="mt-2 bg-gray-800/30 rounded-lg max-h-96 overflow-y-auto">
+                <div class="divide-y divide-gray-700/50">
+                    <template x-for="(track, idx) in missingTracks" :key="track.spotify_id || idx">
+                        <div class="p-3">
+                            <!-- Track Info -->
+                            <div class="flex items-center justify-between mb-2">
+                                <div>
+                                    <span class="text-white font-medium" x-text="track.title"></span>
+                                    <span class="text-gray-400"> by </span>
+                                    <span class="text-gray-300" x-text="track.artist"></span>
+                                    <span class="text-gray-500 text-sm ml-2" x-text="'(' + track.album + ')'"></span>
+                                </div>
+                            </div>
+                            <!-- Suggestions -->
+                            <div x-show="track.suggestions && track.suggestions.length > 0" class="ml-4 space-y-1">
+                                <div class="text-xs text-gray-500 mb-1">Possible matches:</div>
+                                <template x-for="(sug, sidx) in track.suggestions" :key="sug.qobuz_id">
+                                    <div class="flex items-center justify-between bg-gray-700/30 rounded p-2 text-sm">
+                                        <div class="flex-1">
+                                            <span class="text-white" x-text="sug.title"></span>
+                                            <span class="text-gray-400"> by </span>
+                                            <span class="text-gray-300" x-text="sug.artist"></span>
+                                            <span class="text-gray-500 text-xs ml-1" x-text="'(' + sug.album + ')'"></span>
+                                            <span class="ml-2 px-1.5 py-0.5 rounded text-xs"
+                                                  :class="sug.score >= 60 ? 'bg-yellow-600/30 text-yellow-400' : 'bg-gray-600/30 text-gray-400'"
+                                                  x-text="sug.score + '% match'"></span>
+                                        </div>
+                                        <button @click="approveSuggestion(track, sug)"
+                                                class="ml-2 px-3 py-1 bg-green-600 hover:bg-green-500 rounded text-xs text-white">
+                                            Add to Favorites
+                                        </button>
+                                    </div>
+                                </template>
+                            </div>
+                            <div x-show="!track.suggestions || track.suggestions.length === 0" class="ml-4 text-xs text-gray-500">
+                                No suggestions available
+                            </div>
+                        </div>
+                    </template>
+                </div>
             </div>
         </div>
     </div>
@@ -430,6 +452,56 @@ function syncApp() {
             };
 
             poll();
+        },
+
+        async approveSuggestion(track, suggestion) {
+            const btn = event.target;
+            const originalText = btn.textContent;
+            btn.disabled = true;
+            btn.textContent = 'Adding...';
+
+            try {
+                const formData = new FormData();
+                formData.append('qobuz_id', suggestion.qobuz_id);
+                if (track.spotify_id) {
+                    formData.append('spotify_id', track.spotify_id);
+                }
+
+                const res = await fetch('/api/qobuz/favorite', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                if (res.ok) {
+                    btn.textContent = 'Added!';
+                    btn.classList.remove('bg-green-600', 'hover:bg-green-500');
+                    btn.classList.add('bg-gray-600');
+
+                    // Update the UI - mark this suggestion as approved
+                    suggestion.approved = true;
+
+                    // Optionally remove from missing tracks after a delay
+                    setTimeout(() => {
+                        const idx = this.missingTracks.findIndex(t => t.spotify_id === track.spotify_id);
+                        if (idx !== -1) {
+                            this.finalReport.missing_tracks.splice(idx, 1);
+                        }
+                    }, 1500);
+
+                    // Refresh Qobuz stats
+                    await this.refreshQobuz();
+                } else {
+                    const error = await res.json();
+                    alert('Failed to add: ' + (error.detail || 'Unknown error'));
+                    btn.textContent = originalText;
+                    btn.disabled = false;
+                }
+            } catch (e) {
+                console.error('Failed to approve suggestion:', e);
+                alert('Failed to add track: ' + e.message);
+                btn.textContent = originalText;
+                btn.disabled = false;
+            }
         }
     };
 }

@@ -75,23 +75,83 @@ class TrackMatcherV2:
         2. Try fuzzy matching with multiple candidates
         3. Try alternative search queries if needed
         """
+        result, _ = self.match_track_with_suggestions(spotify_track)
+        return result
+
+    def match_track_with_suggestions(
+        self,
+        spotify_track: Dict,
+        suggestion_threshold: float = 40.0
+    ) -> Tuple[Optional[MatchResult], List[Dict]]:
+        """
+        Match a Spotify track and return near-miss suggestions if no match found.
+
+        Returns:
+            Tuple of (match_result, suggestions)
+            - match_result: The matched track or None
+            - suggestions: List of potential matches with scores (if no match found)
+        """
         # Try ISRC matching first
         if spotify_track.get('isrc'):
             result = self._match_by_isrc(spotify_track)
             if result:
-                return result
+                return result, []
 
-        # Try fuzzy matching with all candidates
-        result = self._match_by_fuzzy_multi(spotify_track)
-        if result:
-            return result
+        # Get candidates for fuzzy matching
+        candidates = self._search_candidates(
+            spotify_track['title'],
+            spotify_track['artist']
+        )
+
+        # Score all candidates
+        scored_candidates = []
+        for candidate in candidates:
+            score = self._score_candidate(spotify_track, candidate)
+            duration_diff = abs(spotify_track['duration'] - candidate['duration'])
+            scored_candidates.append({
+                'candidate': candidate,
+                'score': score,
+                'duration_diff': duration_diff
+            })
+
+        # Sort by score
+        scored_candidates.sort(key=lambda x: x['score'], reverse=True)
+
+        # Check for a good match
+        if scored_candidates:
+            best = scored_candidates[0]
+            if (best['score'] >= self.MIN_COMBINED_SCORE and
+                best['duration_diff'] <= self.DURATION_TOLERANCE_MS):
+                logger.info(
+                    f"Fuzzy match (score={best['score']:.1f}): "
+                    f"{spotify_track['title']} by {spotify_track['artist']} "
+                    f"-> {best['candidate']['title']} by {best['candidate']['artist']}"
+                )
+                return MatchResult(
+                    qobuz_track=best['candidate'],
+                    match_type='fuzzy',
+                    score=best['score']
+                ), []
 
         # Try alternative search strategies
         result = self._match_alternative(spotify_track)
         if result:
-            return result
+            return result, []
 
-        return None
+        # No match - return suggestions
+        suggestions = []
+        for sc in scored_candidates[:5]:  # Top 5 suggestions
+            if sc['score'] >= suggestion_threshold:
+                suggestions.append({
+                    'qobuz_id': sc['candidate']['id'],
+                    'title': sc['candidate']['title'],
+                    'artist': sc['candidate']['artist'],
+                    'album': sc['candidate']['album'],
+                    'score': round(sc['score'], 1),
+                    'duration_diff_sec': round(sc['duration_diff'] / 1000, 1)
+                })
+
+        return None, suggestions
 
     def _match_by_isrc(self, spotify_track: Dict) -> Optional[MatchResult]:
         """Match track using ISRC code."""
