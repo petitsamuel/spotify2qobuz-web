@@ -59,13 +59,24 @@ class ProgressCallback:
         """Calculate overall completion percentage."""
         if self.total_playlists == 0:
             return 0.0
-        playlist_progress = (self.current_playlist_index / self.total_playlists) * 100
+
+        # For single playlist (favorites), just use track progress
+        if self.total_playlists == 1:
+            if self.total_tracks > 0:
+                return (self.current_track_index / self.total_tracks) * 100
+            return 0.0
+
+        # For multiple playlists, weight by playlist + track progress
+        completed_playlists = max(0, self.current_playlist_index - 1)
+        playlist_percent = (completed_playlists / self.total_playlists) * 100
+
+        # Add current playlist's track progress
         if self.total_tracks > 0:
-            track_progress = (self.current_track_index / self.total_tracks) * 100
-            playlist_contrib = playlist_progress * 0.9
-            track_contrib = (track_progress / self.total_playlists) * 0.1
-            return min(playlist_contrib + track_contrib, 100.0)
-        return playlist_progress
+            track_percent = (self.current_track_index / self.total_tracks) * 100
+            current_playlist_contrib = track_percent / self.total_playlists
+            return min(playlist_percent + current_playlist_contrib, 100.0)
+
+        return playlist_percent
 
 
 class AsyncSyncService:
