@@ -108,6 +108,24 @@ class Storage:
                 )
             """)
 
+            # Store unmatched tracks for review
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS unmatched_tracks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    spotify_id TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    artist TEXT NOT NULL,
+                    album TEXT,
+                    sync_type TEXT NOT NULL,
+                    suggestions_json TEXT,
+                    status TEXT DEFAULT 'pending',
+                    resolved_qobuz_id TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(spotify_id, sync_type)
+                )
+            """)
+
             await db.commit()
 
     async def save_credentials(self, service: str, credentials: Dict):
@@ -336,4 +354,122 @@ class Storage:
                 WHERE status = 'running'
             """, (datetime.now().isoformat(),))
 
+            await db.commit()
+
+    # --- Unmatched tracks for review ---
+
+    async def save_unmatched_track(
+        self,
+        spotify_id: str,
+        title: str,
+        artist: str,
+        album: str,
+        sync_type: str,
+        suggestions: List[Dict]
+    ):
+        """Save an unmatched track for later review."""
+        now = datetime.now().isoformat()
+        suggestions_json = json.dumps(suggestions) if suggestions else None
+
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("""
+                INSERT OR REPLACE INTO unmatched_tracks
+                (spotify_id, title, artist, album, sync_type, suggestions_json, status, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+            """, (spotify_id, title, artist, album, sync_type, suggestions_json, now, now))
+            await db.commit()
+
+    async def get_unmatched_tracks(
+        self,
+        sync_type: str = None,
+        status: str = 'pending',
+        limit: int = 100,
+        offset: int = 0
+    ) -> List[Dict]:
+        """Get unmatched tracks for review."""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+
+            query = "SELECT * FROM unmatched_tracks WHERE 1=1"
+            params = []
+
+            if sync_type:
+                query += " AND sync_type = ?"
+                params.append(sync_type)
+
+            if status:
+                query += " AND status = ?"
+                params.append(status)
+
+            query += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
+            params.extend([limit, offset])
+
+            cursor = await db.execute(query, params)
+            rows = await cursor.fetchall()
+
+            results = []
+            for row in rows:
+                item = dict(row)
+                if item.get('suggestions_json'):
+                    item['suggestions'] = json.loads(item['suggestions_json'])
+                else:
+                    item['suggestions'] = []
+                results.append(item)
+
+            return results
+
+    async def get_unmatched_count(self, sync_type: str = None, status: str = 'pending') -> int:
+        """Get count of unmatched tracks."""
+        async with aiosqlite.connect(self.db_path) as db:
+            query = "SELECT COUNT(*) FROM unmatched_tracks WHERE 1=1"
+            params = []
+
+            if sync_type:
+                query += " AND sync_type = ?"
+                params.append(sync_type)
+
+            if status:
+                query += " AND status = ?"
+                params.append(status)
+
+            cursor = await db.execute(query, params)
+            row = await cursor.fetchone()
+            return row[0] if row else 0
+
+    async def resolve_unmatched_track(
+        self,
+        spotify_id: str,
+        sync_type: str,
+        qobuz_id: str,
+        status: str = 'resolved'
+    ):
+        """Mark an unmatched track as resolved."""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("""
+                UPDATE unmatched_tracks
+                SET status = ?, resolved_qobuz_id = ?, updated_at = ?
+                WHERE spotify_id = ? AND sync_type = ?
+            """, (status, qobuz_id, datetime.now().isoformat(), spotify_id, sync_type))
+            await db.commit()
+
+    async def dismiss_unmatched_track(self, spotify_id: str, sync_type: str):
+        """Mark an unmatched track as dismissed (user chose to skip)."""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("""
+                UPDATE unmatched_tracks
+                SET status = 'dismissed', updated_at = ?
+                WHERE spotify_id = ? AND sync_type = ?
+            """, (datetime.now().isoformat(), spotify_id, sync_type))
+            await db.commit()
+
+    async def clear_unmatched_tracks(self, sync_type: str = None):
+        """Clear unmatched tracks (optionally by sync type)."""
+        async with aiosqlite.connect(self.db_path) as db:
+            if sync_type:
+                await db.execute(
+                    "DELETE FROM unmatched_tracks WHERE sync_type = ?",
+                    (sync_type,)
+                )
+            else:
+                await db.execute("DELETE FROM unmatched_tracks")
             await db.commit()

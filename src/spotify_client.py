@@ -212,6 +212,130 @@ class SpotifyClient:
         logger.info(f"Retrieved {len(tracks)} saved tracks from Spotify")
         return tracks
 
+    def get_saved_albums(self) -> List[Dict]:
+        """
+        Get all saved/liked albums for the authenticated user.
+
+        Returns:
+            List of normalized album dictionaries with keys:
+            - title: Album title
+            - artist: Primary artist name
+            - upc: UPC code (if available)
+            - release_year: Year of release
+
+        Raises:
+            Exception: If not authenticated or API call fails
+        """
+        if not self.sp:
+            raise Exception("Not authenticated. Call authenticate_user() first.")
+
+        albums = []
+        offset = 0
+        limit = 50
+
+        while True:
+            results = self.sp.current_user_saved_albums(
+                limit=limit,
+                offset=offset
+            )
+
+            for item in results['items']:
+                album_data = item.get('album')
+                if not album_data:
+                    continue
+
+                # Extract UPC if available
+                upc = None
+                external_ids = album_data.get('external_ids', {})
+                if external_ids and 'upc' in external_ids:
+                    upc = external_ids['upc']
+
+                # Get primary artist
+                artist = album_data['artists'][0]['name'] if album_data['artists'] else "Unknown"
+
+                # Get release year
+                release_date = album_data.get('release_date', '')
+                release_year = release_date[:4] if release_date else None
+
+                album = {
+                    'id': album_data['id'],
+                    'title': album_data['name'],
+                    'artist': artist,
+                    'upc': upc,
+                    'release_year': release_year,
+                    'total_tracks': album_data.get('total_tracks', 0)
+                }
+                albums.append(album)
+
+            if not results['next']:
+                break
+
+            offset += limit
+
+        logger.info(f"Retrieved {len(albums)} saved albums from Spotify")
+        return albums
+
+    def iter_saved_albums(self, start_offset: int = 0):
+        """
+        Generator that yields saved albums one at a time with pagination.
+
+        Args:
+            start_offset: Starting offset for resuming interrupted syncs
+
+        Yields:
+            Tuple of (album_dict, spotify_id, current_offset, total_albums)
+        """
+        if not self.sp:
+            raise Exception("Not authenticated. Call authenticate_user() first.")
+
+        offset = start_offset
+        limit = 50
+        total = None
+
+        while True:
+            results = self.sp.current_user_saved_albums(
+                limit=limit,
+                offset=offset
+            )
+
+            if total is None:
+                total = results.get('total', 0)
+                logger.info(f"Streaming {total} saved albums from Spotify (starting at {start_offset})")
+
+            for item in results['items']:
+                album_data = item.get('album')
+                if not album_data:
+                    continue
+
+                # Extract UPC if available
+                upc = None
+                external_ids = album_data.get('external_ids', {})
+                if external_ids and 'upc' in external_ids:
+                    upc = external_ids['upc']
+
+                # Get primary artist
+                artist = album_data['artists'][0]['name'] if album_data['artists'] else "Unknown"
+
+                # Get release year
+                release_date = album_data.get('release_date', '')
+                release_year = release_date[:4] if release_date else None
+
+                spotify_id = album_data['id']
+                album = {
+                    'id': spotify_id,
+                    'title': album_data['name'],
+                    'artist': artist,
+                    'upc': upc,
+                    'release_year': release_year,
+                    'total_tracks': album_data.get('total_tracks', 0)
+                }
+                yield album, spotify_id, offset, total
+
+            if not results['next']:
+                break
+
+            offset += limit
+
     def iter_saved_tracks(self, start_offset: int = 0):
         """
         Generator that yields saved tracks one at a time with pagination.
