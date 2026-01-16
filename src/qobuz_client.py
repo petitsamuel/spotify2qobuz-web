@@ -5,12 +5,95 @@ This approach uses session tokens from browser cookies instead of app_id/passwor
 which works with Google login accounts and bypasses 2025 API restrictions.
 """
 
-from typing import Dict, List, Optional
+import time
+from functools import wraps
+from typing import Dict, List, Optional, Callable
 import requests
 from src.utils.logger import get_logger
 
 
 logger = get_logger()
+
+
+class AdaptiveRateLimiter:
+    """Adaptive rate limiter that slows down when rate limited."""
+
+    def __init__(self, initial_delay: float = 0.1, max_delay: float = 5.0):
+        self.delay = initial_delay
+        self.initial_delay = initial_delay
+        self.max_delay = max_delay
+        self.consecutive_successes = 0
+        self.rate_limited_count = 0
+
+    def wait(self):
+        """Wait for the current delay period."""
+        if self.delay > 0:
+            time.sleep(self.delay)
+
+    def on_success(self):
+        """Called after a successful request."""
+        self.consecutive_successes += 1
+        # Speed up after 10 consecutive successes
+        if self.consecutive_successes >= 10 and self.delay > self.initial_delay:
+            self.delay = max(self.initial_delay, self.delay * 0.8)
+            self.consecutive_successes = 0
+            logger.debug(f"Rate limiter: speeding up to {self.delay:.2f}s delay")
+
+    def on_rate_limit(self):
+        """Called when rate limited."""
+        self.consecutive_successes = 0
+        self.rate_limited_count += 1
+        self.delay = min(self.max_delay, self.delay * 2)
+        logger.warning(f"Rate limited! Slowing down to {self.delay:.2f}s delay")
+
+    def get_stats(self) -> Dict:
+        """Get rate limiter statistics."""
+        return {
+            "current_delay": self.delay,
+            "rate_limited_count": self.rate_limited_count
+        }
+
+
+def retry_with_backoff(max_retries: int = 3, initial_delay: float = 1.0):
+    """Decorator for retrying requests with exponential backoff."""
+    def decorator(func: Callable):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            last_exception = None
+            delay = initial_delay
+
+            for attempt in range(max_retries + 1):
+                try:
+                    return func(*args, **kwargs)
+                except requests.exceptions.HTTPError as e:
+                    last_exception = e
+                    status_code = e.response.status_code if e.response else 0
+
+                    # Don't retry client errors (except rate limit)
+                    if 400 <= status_code < 500 and status_code != 429:
+                        raise
+
+                    # Rate limited - wait longer
+                    if status_code == 429:
+                        retry_after = int(e.response.headers.get('Retry-After', delay * 2))
+                        logger.warning(f"Rate limited (429). Waiting {retry_after}s...")
+                        time.sleep(retry_after)
+                        delay = retry_after
+                    else:
+                        if attempt < max_retries:
+                            logger.warning(f"Request failed (attempt {attempt + 1}/{max_retries + 1}): {e}")
+                            time.sleep(delay)
+                            delay *= 2
+                except requests.exceptions.RequestException as e:
+                    last_exception = e
+                    if attempt < max_retries:
+                        logger.warning(f"Request failed (attempt {attempt + 1}/{max_retries + 1}): {e}")
+                        time.sleep(delay)
+                        delay *= 2
+
+            raise last_exception
+        return wrapper
+    return decorator
 
 
 class QobuzClient:
@@ -26,14 +109,17 @@ class QobuzClient:
     def __init__(self, user_auth_token: str):
         """
         Initialize Qobuz client with session token.
-        
+
         Args:
             user_auth_token: Session token from browser cookies (user_auth_token or X-User-Auth-Token)
         """
         self.user_auth_token = user_auth_token
         self.user_id: Optional[int] = None
         self.user_name: Optional[str] = None
-        
+
+        # Adaptive rate limiter
+        self.rate_limiter = AdaptiveRateLimiter(initial_delay=0.05, max_delay=5.0)
+
         # Create session with required headers
         self._session = requests.Session()
         self._session.headers.update({
@@ -87,40 +173,78 @@ class QobuzClient:
             logger.error(f"Network error during token validation: {e}")
             raise Exception(f"Qobuz authentication failed: {e}")
     
-    def _make_request(self, endpoint: str, params: Dict = None, method: str = "GET") -> Dict:
+    def _make_request(self, endpoint: str, params: Dict = None, method: str = "GET", max_retries: int = 3) -> Dict:
         """
-        Make authenticated request to Qobuz API.
-        
+        Make authenticated request to Qobuz API with retry and rate limiting.
+
         Args:
             endpoint: API endpoint (without base URL)
             params: Query parameters or request body
             method: HTTP method (GET or POST)
-        
+            max_retries: Maximum number of retry attempts
+
         Returns:
             Response JSON
-        
+
         Raises:
-            Exception: If request fails
+            Exception: If request fails after retries
         """
         if not self.user_auth_token:
             raise Exception("Not authenticated. Call authenticate() first.")
-        
+
         url = f"{self.BASE_URL}/{endpoint}"
-        
-        try:
-            if method == "GET":
-                response = self._session.get(url, params=params, timeout=10)
-            else:  # POST
-                response = self._session.post(url, json=params, timeout=10)
-            
-            response.raise_for_status()
-            return response.json()
-            
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Qobuz API request failed for {endpoint}: {e}")
-            if hasattr(e, 'response') and e.response is not None:
-                logger.error(f"Response: {e.response.text}")
-            raise Exception(f"Qobuz API request failed: {e}")
+        last_exception = None
+        delay = 1.0
+
+        for attempt in range(max_retries + 1):
+            try:
+                # Apply rate limiting
+                self.rate_limiter.wait()
+
+                if method == "GET":
+                    response = self._session.get(url, params=params, timeout=15)
+                else:  # POST
+                    response = self._session.post(url, json=params, timeout=15)
+
+                # Check for rate limiting
+                if response.status_code == 429:
+                    self.rate_limiter.on_rate_limit()
+                    retry_after = int(response.headers.get('Retry-After', delay * 2))
+                    logger.warning(f"Rate limited on {endpoint}. Waiting {retry_after}s...")
+                    time.sleep(retry_after)
+                    delay = retry_after
+                    continue
+
+                response.raise_for_status()
+                self.rate_limiter.on_success()
+                return response.json()
+
+            except requests.exceptions.HTTPError as e:
+                last_exception = e
+                status_code = e.response.status_code if e.response else 0
+
+                # Don't retry client errors (except rate limit already handled)
+                if 400 <= status_code < 500:
+                    logger.error(f"Client error on {endpoint}: {status_code}")
+                    if e.response is not None:
+                        logger.error(f"Response: {e.response.text}")
+                    raise Exception(f"Qobuz API error: {status_code}")
+
+                # Server error - retry
+                if attempt < max_retries:
+                    logger.warning(f"Server error on {endpoint} (attempt {attempt + 1}): {e}")
+                    time.sleep(delay)
+                    delay *= 2
+
+            except requests.exceptions.RequestException as e:
+                last_exception = e
+                if attempt < max_retries:
+                    logger.warning(f"Request failed for {endpoint} (attempt {attempt + 1}): {e}")
+                    time.sleep(delay)
+                    delay *= 2
+
+        logger.error(f"Qobuz API request failed for {endpoint} after {max_retries + 1} attempts")
+        raise Exception(f"Qobuz API request failed: {last_exception}")
     
     def search_by_isrc(self, isrc: str) -> Optional[Dict]:
         """

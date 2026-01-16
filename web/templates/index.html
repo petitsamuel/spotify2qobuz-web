@@ -90,6 +90,30 @@
             <span class="text-gray-400">Match Rate:</span>
             <span class="text-2xl font-bold" :class="matchRateColor" x-text="matchRate.toFixed(1) + '%'"></span>
         </div>
+
+        <!-- Live Missing Tracks -->
+        <div x-show="progress.recent_missing && progress.recent_missing.length > 0" class="mt-4">
+            <button @click="showLiveMissing = !showLiveMissing"
+                    class="w-full flex items-center justify-between bg-yellow-900/20 rounded-lg p-2 hover:bg-yellow-900/30 transition">
+                <span class="text-yellow-400 text-sm font-medium">
+                    Recent tracks not found (<span x-text="progress.tracks_not_matched || 0"></span> total)
+                </span>
+                <svg class="w-4 h-4 text-yellow-400 transition-transform" :class="showLiveMissing ? 'rotate-180' : ''" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>
+                </svg>
+            </button>
+            <div x-show="showLiveMissing" class="mt-2 bg-gray-800/50 rounded-lg max-h-48 overflow-y-auto">
+                <div class="divide-y divide-gray-700/30">
+                    <template x-for="(track, idx) in (progress.recent_missing || []).slice().reverse()" :key="idx">
+                        <div class="px-3 py-2 text-sm">
+                            <span class="text-white" x-text="track.title"></span>
+                            <span class="text-gray-500"> - </span>
+                            <span class="text-gray-400" x-text="track.artist"></span>
+                        </div>
+                    </template>
+                </div>
+            </div>
+        </div>
     </div>
 
     <!-- Completion Summary -->
@@ -349,6 +373,7 @@ function syncApp() {
         syncing: false,
         completed: false,
         showMissing: false,
+        showLiveMissing: true,  // Show live missing tracks by default
         syncType: '',
         taskId: null,
         progress: {},

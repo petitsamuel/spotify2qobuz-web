@@ -31,6 +31,8 @@ class ProgressCallback:
         self.tracks_not_matched = 0
         self.isrc_matches = 0
         self.fuzzy_matches = 0
+        self.recent_missing: List[Dict] = []  # Last N missing tracks for live display
+        self.max_recent_missing = 20  # Keep last 20 missing tracks
 
     def update(self, **kwargs):
         """Update progress and call callback."""
@@ -39,6 +41,12 @@ class ProgressCallback:
                 setattr(self, key, value)
         if self.callback:
             self.callback(self.to_dict())
+
+    def add_missing_track(self, track: Dict):
+        """Add a missing track to recent list."""
+        self.recent_missing.append(track)
+        if len(self.recent_missing) > self.max_recent_missing:
+            self.recent_missing.pop(0)
 
     def to_dict(self) -> Dict:
         """Convert to dictionary."""
@@ -53,6 +61,7 @@ class ProgressCallback:
             "isrc_matches": self.isrc_matches,
             "fuzzy_matches": self.fuzzy_matches,
             "percent_complete": self._calculate_percent(),
+            "recent_missing": self.recent_missing,
         }
 
     def _calculate_percent(self) -> float:
@@ -443,11 +452,18 @@ class AsyncSyncService:
         else:
             report["tracks_not_matched"] += 1
             self.progress.update(tracks_not_matched=report["tracks_not_matched"])
-            report["missing_tracks"].append({
+            missing_track = {
                 "spotify_id": spotify_id,
                 "title": track['title'],
                 "artist": track['artist'],
                 "album": track['album'],
                 "suggestions": suggestions
+            }
+            report["missing_tracks"].append(missing_track)
+            # Add to live progress for real-time display
+            self.progress.add_missing_track({
+                "title": track['title'],
+                "artist": track['artist']
             })
+            self.progress.update()  # Trigger callback with updated missing tracks
 
