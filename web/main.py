@@ -427,8 +427,12 @@ async def run_sync_task(
 
         progress_callback = ProgressCallback(on_progress)
 
-        # Start background task to periodically save progress to migration table
+        # Track which missing tracks have been saved to avoid duplicates
+        saved_missing_ids = set()
+
+        # Start background task to periodically save progress and unmatched tracks
         async def save_progress_periodically():
+            nonlocal saved_missing_ids
             while True:
                 await asyncio.sleep(2)  # Save every 2 seconds
                 progress = active_tasks.get(task_id, {}).get("progress", {})
@@ -440,6 +444,20 @@ async def run_sync_task(
                         isrc_matches=progress.get("isrc_matches", 0),
                         fuzzy_matches=progress.get("fuzzy_matches", 0)
                     )
+
+                    # Save new unmatched tracks incrementally
+                    for missing in progress.get("recent_missing", []):
+                        spotify_id = missing.get("spotify_id", "")
+                        if spotify_id and spotify_id not in saved_missing_ids:
+                            saved_missing_ids.add(spotify_id)
+                            await storage.save_unmatched_track(
+                                spotify_id=spotify_id,
+                                title=missing.get("title", ""),
+                                artist=missing.get("artist", ""),
+                                album=missing.get("album", ""),
+                                sync_type=sync_type,
+                                suggestions=missing.get("suggestions", [])
+                            )
 
         progress_saver_task = asyncio.create_task(save_progress_periodically())
 
@@ -468,16 +486,18 @@ async def run_sync_task(
                         "favorites"
                     )
 
-            # Save unmatched tracks to DB for review
+            # Save any remaining unmatched tracks to DB (ones not caught by incremental save)
             for missing in report.get("missing_tracks", []):
-                await storage.save_unmatched_track(
-                    spotify_id=missing.get("spotify_id", ""),
-                    title=missing.get("title", ""),
-                    artist=missing.get("artist", ""),
-                    album=missing.get("album", ""),
-                    sync_type="favorites",
-                    suggestions=missing.get("suggestions", [])
-                )
+                spotify_id = missing.get("spotify_id", "")
+                if spotify_id and spotify_id not in saved_missing_ids:
+                    await storage.save_unmatched_track(
+                        spotify_id=spotify_id,
+                        title=missing.get("title", ""),
+                        artist=missing.get("artist", ""),
+                        album=missing.get("album", ""),
+                        sync_type="favorites",
+                        suggestions=missing.get("suggestions", [])
+                    )
         elif sync_type == "albums":
             # Load already synced albums for resume support
             already_synced = await storage.get_synced_track_ids("albums")
@@ -496,16 +516,18 @@ async def run_sync_task(
                         "albums"
                     )
 
-            # Save unmatched albums to DB for review
+            # Save any remaining unmatched albums to DB (ones not caught by incremental save)
             for missing in report.get("missing_albums", []):
-                await storage.save_unmatched_track(
-                    spotify_id=missing.get("spotify_id", ""),
-                    title=missing.get("title", ""),
-                    artist=missing.get("artist", ""),
-                    album="",  # Albums don't have an album field
-                    sync_type="albums",
-                    suggestions=missing.get("suggestions", [])
-                )
+                spotify_id = missing.get("spotify_id", "")
+                if spotify_id and spotify_id not in saved_missing_ids:
+                    await storage.save_unmatched_track(
+                        spotify_id=spotify_id,
+                        title=missing.get("title", ""),
+                        artist=missing.get("artist", ""),
+                        album="",  # Albums don't have an album field
+                        sync_type="albums",
+                        suggestions=missing.get("suggestions", [])
+                    )
 
             # Map album-specific keys to generic keys for display
             report["tracks_matched"] = report.get("albums_matched", 0)

@@ -36,6 +36,25 @@
     </div>
 
     {% if auth_status.both_connected %}
+    <!-- Unmatched Tracks Banner -->
+    <div x-show="pendingUnmatched > 0 && !syncing && !completed" x-cloak
+         class="bg-yellow-900/30 border border-yellow-600/50 rounded-lg p-4 flex items-center justify-between">
+        <div class="flex items-center gap-3">
+            <div class="w-10 h-10 bg-yellow-600/30 rounded-full flex items-center justify-center">
+                <span class="text-xl">!</span>
+            </div>
+            <div>
+                <p class="font-medium text-yellow-400">
+                    <span x-text="pendingUnmatched"></span> tracks couldn't be matched
+                </p>
+                <p class="text-sm text-gray-400">Review and manually match them to Qobuz</p>
+            </div>
+        </div>
+        <a href="/review" class="px-4 py-2 bg-yellow-600 hover:bg-yellow-500 rounded-lg text-sm font-medium">
+            Review Now
+        </a>
+    </div>
+
     <!-- Active Sync Progress -->
     <div x-show="syncing" x-cloak class="bg-gradient-to-r from-green-900/30 to-blue-900/30 rounded-lg p-6 border border-blue-500">
         <div class="flex items-center justify-between mb-4">
@@ -192,6 +211,13 @@
         <div class="bg-gray-800/70 rounded-lg p-4 flex items-center justify-between">
             <span class="text-gray-300 font-medium">Overall Match Rate</span>
             <span class="text-4xl font-bold" :class="matchRateColor" x-text="matchRate.toFixed(1) + '%'"></span>
+        </div>
+
+        <!-- Review Link -->
+        <div x-show="(progress.tracks_not_matched || 0) > 0" class="mt-4">
+            <a href="/review" class="block w-full text-center px-4 py-3 bg-yellow-600 hover:bg-yellow-500 rounded-lg font-medium">
+                Review <span x-text="progress.tracks_not_matched"></span> Unmatched Tracks
+            </a>
         </div>
 
         <!-- Missing Tracks with Suggestions -->
@@ -439,6 +465,7 @@ function syncApp() {
         dryRun: false,
         spotifyStats: { playlists: '...', savedTracks: '...', savedAlbums: '...' },
         qobuzStats: { playlists: '...', fromSpotify: '...', favorites: '...', favoriteAlbums: '...' },
+        pendingUnmatched: 0,
 
         get missingTracks() {
             return this.finalReport?.missing_tracks || [];
@@ -461,6 +488,19 @@ function syncApp() {
             await this.refreshSpotify();
             await this.refreshQobuz();
             await this.checkActiveSync();
+            await this.checkPendingUnmatched();
+        },
+
+        async checkPendingUnmatched() {
+            try {
+                const res = await fetch('/api/unmatched?status=pending&limit=1');
+                if (res.ok) {
+                    const data = await res.json();
+                    this.pendingUnmatched = data.total || 0;
+                }
+            } catch (e) {
+                console.error('Failed to check unmatched:', e);
+            }
         },
 
         async checkActiveSync() {
