@@ -70,8 +70,12 @@ export class Storage {
   private getEncryptionKey(): string {
     const key = process.env.ENCRYPTION_KEY;
     if (!key) {
-      // In development, generate a key and warn
-      logger.warn('ENCRYPTION_KEY not set, generating temporary key (not for production!)');
+      // In production, encryption key is required to prevent data loss
+      if (process.env.NODE_ENV === 'production') {
+        throw new Error('ENCRYPTION_KEY environment variable is required in production');
+      }
+      // In development, generate a temporary key (credentials won't persist across restarts)
+      logger.warn('ENCRYPTION_KEY not set, generating temporary key (credentials will be lost on restart)');
       return generateEncryptionKey();
     }
     return key;
@@ -199,24 +203,39 @@ export class Storage {
   }
 
   async updateMigration(migrationId: number, updates: Partial<Migration>): Promise<void> {
-    const allowedFields = new Set([
-      'completed_at', 'status', 'playlists_total', 'playlists_synced',
-      'tracks_matched', 'tracks_not_matched', 'isrc_matches',
-      'fuzzy_matches', 'report_json'
-    ]);
-
-    const filtered = Object.entries(updates).filter(([k]) => allowedFields.has(k));
-    if (filtered.length === 0) return;
-
-    // Build dynamic update query
-    const setClauses = filtered.map(([k, v]) => {
-      if (k === 'completed_at' && v === null) {
-        return `${k} = NULL`;
+    // Use individual parameterized updates for each field to avoid SQL injection
+    // This is safer than building dynamic queries with string interpolation
+    if (updates.status !== undefined) {
+      await this.sql`UPDATE migrations SET status = ${updates.status} WHERE id = ${migrationId}`;
+    }
+    if (updates.completed_at !== undefined) {
+      if (updates.completed_at === null) {
+        await this.sql`UPDATE migrations SET completed_at = NULL WHERE id = ${migrationId}`;
+      } else {
+        await this.sql`UPDATE migrations SET completed_at = ${updates.completed_at} WHERE id = ${migrationId}`;
       }
-      return `${k} = '${v}'`;
-    }).join(', ');
-
-    await this.sql.unsafe(`UPDATE migrations SET ${setClauses} WHERE id = ${migrationId}`);
+    }
+    if (updates.playlists_total !== undefined) {
+      await this.sql`UPDATE migrations SET playlists_total = ${updates.playlists_total} WHERE id = ${migrationId}`;
+    }
+    if (updates.playlists_synced !== undefined) {
+      await this.sql`UPDATE migrations SET playlists_synced = ${updates.playlists_synced} WHERE id = ${migrationId}`;
+    }
+    if (updates.tracks_matched !== undefined) {
+      await this.sql`UPDATE migrations SET tracks_matched = ${updates.tracks_matched} WHERE id = ${migrationId}`;
+    }
+    if (updates.tracks_not_matched !== undefined) {
+      await this.sql`UPDATE migrations SET tracks_not_matched = ${updates.tracks_not_matched} WHERE id = ${migrationId}`;
+    }
+    if (updates.isrc_matches !== undefined) {
+      await this.sql`UPDATE migrations SET isrc_matches = ${updates.isrc_matches} WHERE id = ${migrationId}`;
+    }
+    if (updates.fuzzy_matches !== undefined) {
+      await this.sql`UPDATE migrations SET fuzzy_matches = ${updates.fuzzy_matches} WHERE id = ${migrationId}`;
+    }
+    if (updates.report_json !== undefined) {
+      await this.sql`UPDATE migrations SET report_json = ${updates.report_json} WHERE id = ${migrationId}`;
+    }
   }
 
   async getMigration(migrationId: number): Promise<Migration | null> {

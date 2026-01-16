@@ -567,33 +567,31 @@ export class QobuzClient {
 
   /**
    * Get favorite tracks with their ISRCs for pre-matching.
+   * Throws on error to prevent duplicate additions during sync.
    */
   async getFavoriteTracksWithIsrc(limit: number = 5000): Promise<Map<string, number>> {
-    try {
-      const response = await fetch(
-        `${QOBUZ_API_BASE}/favorite/getUserFavorites?type=tracks&limit=${limit}&offset=0`,
-        { headers: this.headers, signal: AbortSignal.timeout(60000) }
-      );
+    const response = await fetch(
+      `${QOBUZ_API_BASE}/favorite/getUserFavorites?type=tracks&limit=${limit}&offset=0`,
+      { headers: this.headers, signal: AbortSignal.timeout(60000) }
+    );
 
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    if (!response.ok) {
+      throw new Error(`Failed to fetch Qobuz favorites: HTTP ${response.status}`);
+    }
 
-      const data = await response.json();
-      const isrcMap = new Map<string, number>();
+    const data = await response.json();
+    const isrcMap = new Map<string, number>();
 
-      if (data.tracks?.items) {
-        for (const item of data.tracks.items) {
-          if (item.isrc && item.id) {
-            isrcMap.set(item.isrc, item.id);
-          }
+    if (data.tracks?.items) {
+      for (const item of data.tracks.items) {
+        if (item.isrc && item.id) {
+          isrcMap.set(item.isrc, item.id);
         }
       }
-
-      logger.info(`Retrieved ${isrcMap.size} favorite tracks with ISRCs from Qobuz`);
-      return isrcMap;
-    } catch (error) {
-      logger.error(`Failed to get favorite tracks with ISRC: ${error}`);
-      return new Map();
     }
+
+    logger.info(`Retrieved ${isrcMap.size} favorite tracks with ISRCs from Qobuz`);
+    return isrcMap;
   }
 
   /**
@@ -788,33 +786,31 @@ export class QobuzClient {
 
   /**
    * Get favorite albums with UPCs for pre-matching.
+   * Throws on error to prevent duplicate additions during sync.
    */
   async getFavoriteAlbumsWithUpc(limit: number = 5000): Promise<Map<string, string>> {
-    try {
-      const response = await fetch(
-        `${QOBUZ_API_BASE}/favorite/getUserFavorites?type=albums&limit=${limit}&offset=0`,
-        { headers: this.headers, signal: AbortSignal.timeout(60000) }
-      );
+    const response = await fetch(
+      `${QOBUZ_API_BASE}/favorite/getUserFavorites?type=albums&limit=${limit}&offset=0`,
+      { headers: this.headers, signal: AbortSignal.timeout(60000) }
+    );
 
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    if (!response.ok) {
+      throw new Error(`Failed to fetch Qobuz favorite albums: HTTP ${response.status}`);
+    }
 
-      const data = await response.json();
-      const upcMap = new Map<string, string>();
+    const data = await response.json();
+    const upcMap = new Map<string, string>();
 
-      if (data.albums?.items) {
-        for (const item of data.albums.items) {
-          if (item.upc && item.id) {
-            upcMap.set(item.upc, String(item.id));
-          }
+    if (data.albums?.items) {
+      for (const item of data.albums.items) {
+        if (item.upc && item.id) {
+          upcMap.set(item.upc, String(item.id));
         }
       }
-
-      logger.info(`Retrieved ${upcMap.size} favorite albums with UPCs from Qobuz`);
-      return upcMap;
-    } catch (error) {
-      logger.error(`Failed to get favorite albums with UPC: ${error}`);
-      return new Map();
     }
+
+    logger.info(`Retrieved ${upcMap.size} favorite albums with UPCs from Qobuz`);
+    return upcMap;
   }
 
   /**

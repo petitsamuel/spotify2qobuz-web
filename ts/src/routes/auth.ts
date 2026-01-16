@@ -56,8 +56,13 @@ export function createAuthRoutes(storage: Storage): Hono {
     spotifyOAuthState.delete(state);
 
     try {
-      const clientId = process.env.SPOTIFY_CLIENT_ID!;
-      const clientSecret = process.env.SPOTIFY_CLIENT_SECRET!;
+      const clientId = process.env.SPOTIFY_CLIENT_ID;
+      const clientSecret = process.env.SPOTIFY_CLIENT_SECRET;
+
+      if (!clientId || !clientSecret) {
+        logger.error('Missing SPOTIFY_CLIENT_ID or SPOTIFY_CLIENT_SECRET');
+        return c.redirect('/?error=missing_spotify_config');
+      }
 
       const credentials = await SpotifyClient.exchangeCode(code, clientId, clientSecret, redirectUri);
 

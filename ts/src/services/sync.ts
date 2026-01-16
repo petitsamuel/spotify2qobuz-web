@@ -361,12 +361,17 @@ export class AsyncSyncService {
       const flushFavorites = async () => {
         if (pendingFavorites.length > 0 && !dryRun) {
           const trackIds = pendingFavorites.map(f => f.qobuz_id);
-          await this.qobuzClient.addFavoriteTracksBatch(trackIds);
+          const success = await this.qobuzClient.addFavoriteTracksBatch(trackIds);
 
-          for (const f of pendingFavorites) {
-            if (onTrackSynced) {
-              onTrackSynced(f.spotify_id, String(f.qobuz_id));
+          if (success) {
+            for (const f of pendingFavorites) {
+              if (onTrackSynced) {
+                onTrackSynced(f.spotify_id, String(f.qobuz_id));
+              }
             }
+          } else {
+            logger.error(`Failed to add ${trackIds.length} tracks to Qobuz favorites`);
+            report.errors.push(`Failed to add batch of ${trackIds.length} tracks to Qobuz`);
           }
           pendingFavorites.length = 0;
         }
@@ -504,15 +509,20 @@ export class AsyncSyncService {
       let albumIndex = 0;
       const pendingFavorites: Array<{ spotify_id: string; qobuz_id: string }> = [];
 
-      const flushFavorites = async () => {
+      const flushAlbums = async () => {
         if (pendingFavorites.length > 0 && !dryRun) {
           const albumIds = pendingFavorites.map(f => f.qobuz_id);
-          await this.qobuzClient.addFavoriteAlbumsBatch(albumIds);
+          const success = await this.qobuzClient.addFavoriteAlbumsBatch(albumIds);
 
-          for (const f of pendingFavorites) {
-            if (onAlbumSynced) {
-              onAlbumSynced(f.spotify_id, f.qobuz_id);
+          if (success) {
+            for (const f of pendingFavorites) {
+              if (onAlbumSynced) {
+                onAlbumSynced(f.spotify_id, f.qobuz_id);
+              }
             }
+          } else {
+            logger.error(`Failed to add ${albumIds.length} albums to Qobuz favorites`);
+            report.errors.push(`Failed to add batch of ${albumIds.length} albums to Qobuz`);
           }
           pendingFavorites.length = 0;
         }
@@ -592,14 +602,14 @@ export class AsyncSyncService {
 
         // Flush favorites in batches
         if (pendingFavorites.length >= FAVORITE_BATCH) {
-          await flushFavorites();
+          await flushAlbums();
         }
 
         this.progress.update({ current_track_index: albumIndex });
       }
 
       // Flush remaining
-      await flushFavorites();
+      await flushAlbums();
 
       report.completed_at = new Date().toISOString();
     } catch (error) {

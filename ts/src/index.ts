@@ -18,10 +18,23 @@ import ejs from 'ejs';
 // Initialize storage
 const storage = new Storage();
 
-// Initialize database (async, runs at startup)
-(async () => {
-  await storage.initDb();
-  await storage.cleanupStaleTasks();
+// Database initialization state
+let dbInitialized = false;
+let dbInitError: Error | null = null;
+
+// Initialize database with proper error handling
+const dbReady = (async () => {
+  try {
+    await storage.initDb();
+    await storage.cleanupStaleTasks();
+    dbInitialized = true;
+    logger.info('Database initialization complete');
+  } catch (error) {
+    dbInitError = error as Error;
+    logger.error(`Database initialization failed: ${error}`);
+    // In production, we might want to exit; for now, log and continue
+    // so developers can see the error via health check
+  }
 })();
 
 // Create Hono app
@@ -116,9 +129,38 @@ app.get('/review', async (c) => {
   return c.html(html);
 });
 
-// Health check
-app.get('/health', (c) => {
-  return c.json({ status: 'ok' });
+// Health check with database status
+app.get('/health', async (c) => {
+  // Wait for db init to complete (with timeout)
+  const timeout = new Promise<void>((_, reject) =>
+    setTimeout(() => reject(new Error('timeout')), 5000)
+  );
+
+  try {
+    await Promise.race([dbReady, timeout]);
+  } catch {
+    // Timeout or error - continue to report status
+  }
+
+  if (dbInitError) {
+    return c.json({
+      status: 'unhealthy',
+      database: 'error',
+      error: dbInitError.message,
+    }, 503);
+  }
+
+  if (!dbInitialized) {
+    return c.json({
+      status: 'starting',
+      database: 'initializing',
+    }, 503);
+  }
+
+  return c.json({
+    status: 'ok',
+    database: 'connected',
+  });
 });
 
 // Start server
