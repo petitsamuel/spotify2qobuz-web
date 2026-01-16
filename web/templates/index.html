@@ -335,6 +335,23 @@ function syncApp() {
         async init() {
             await this.refreshSpotify();
             await this.refreshQobuz();
+            await this.checkActiveSync();
+        },
+
+        async checkActiveSync() {
+            try {
+                const res = await fetch('/sync/active');
+                const data = await res.json();
+                if (data.task_id) {
+                    this.syncing = true;
+                    this.taskId = data.task_id;
+                    this.syncType = data.sync_type || 'favorites';
+                    this.progress = data.progress || {};
+                    this.pollProgress();
+                }
+            } catch (e) {
+                console.error('Failed to check active sync:', e);
+            }
         },
 
         async refreshSpotify() {

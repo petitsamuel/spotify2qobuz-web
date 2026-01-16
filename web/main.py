@@ -314,6 +314,7 @@ async def start_sync(request: Request, background_tasks: BackgroundTasks):
 
     active_tasks[task_id] = {
         "status": "starting",
+        "sync_type": sync_type,
         "progress": {},
         "migration_id": migration_id
     }
@@ -416,6 +417,15 @@ async def run_sync_task(
         active_tasks[task_id]["error"] = str(e)
         await storage.update_task(task_id, "failed", {"error": str(e)})
         await storage.update_migration(migration_id, status="failed", completed_at=datetime.now().isoformat())
+
+
+@app.get("/sync/active")
+async def get_active_sync():
+    """Get currently running sync task, if any."""
+    for task_id, task in active_tasks.items():
+        if task.get("status") == "running":
+            return {"task_id": task_id, **task}
+    return {"task_id": None}
 
 
 @app.get("/sync/status/{task_id}")
