@@ -989,7 +989,7 @@ async def compare_albums():
 async def compare_stream(compare_type: str):
     """Stream comparison results via SSE for progressive loading."""
     import json
-    from rapidfuzz import fuzz
+    from concurrent.futures import ThreadPoolExecutor, as_completed
 
     if compare_type not in ["favorites", "albums"]:
         raise HTTPException(status_code=400, detail="Invalid comparison type")
@@ -1011,20 +1011,24 @@ async def compare_stream(compare_type: str):
             return s.lower().strip() if s else ""
 
         try:
-            # Phase 1: Fetch Qobuz data first (usually faster)
-            yield send("status", {"phase": "qobuz", "message": "Fetching Qobuz library..."})
+            yield send("status", {"phase": "loading", "message": "Fetching libraries..."})
 
+            # Fetch both libraries in parallel using threads
             qobuz_items = []
-            qobuz_by_id_code = {}  # ISRC or UPC lookup
+            qobuz_by_id_code = {}
+            spotify_items = []
 
-            if compare_type == "favorites":
+            def fetch_qobuz():
+                items = []
+                by_id = {}
                 url = f"{qobuz_client.BASE_URL}/favorite/getUserFavorites"
-                params = {"type": "tracks", "limit": 5000}
+                item_type = "tracks" if compare_type == "favorites" else "albums"
+                params = {"type": item_type, "limit": 5000}
                 response = qobuz_client._session.get(url, params=params, timeout=60)
                 response.raise_for_status()
                 data = response.json()
 
-                if 'tracks' in data and 'items' in data['tracks']:
+                if compare_type == "favorites" and 'tracks' in data and 'items' in data['tracks']:
                     for item in data['tracks']['items']:
                         track = {
                             "id": item['id'],
@@ -1033,17 +1037,10 @@ async def compare_stream(compare_type: str):
                             "album": item.get('album', {}).get('title', ''),
                             "isrc": item.get('isrc')
                         }
-                        qobuz_items.append(track)
+                        items.append(track)
                         if track.get('isrc'):
-                            qobuz_by_id_code[track['isrc']] = track
-            else:  # albums
-                url = f"{qobuz_client.BASE_URL}/favorite/getUserFavorites"
-                params = {"type": "albums", "limit": 5000}
-                response = qobuz_client._session.get(url, params=params, timeout=60)
-                response.raise_for_status()
-                data = response.json()
-
-                if 'albums' in data and 'items' in data['albums']:
+                            by_id[track['isrc']] = track
+                elif compare_type == "albums" and 'albums' in data and 'items' in data['albums']:
                     for item in data['albums']['items']:
                         album = {
                             "id": item['id'],
@@ -1051,60 +1048,62 @@ async def compare_stream(compare_type: str):
                             "artist": item.get('artist', {}).get('name', ''),
                             "upc": item.get('upc')
                         }
-                        qobuz_items.append(album)
+                        items.append(album)
                         if album.get('upc'):
-                            qobuz_by_id_code[album['upc']] = album
+                            by_id[album['upc']] = album
+                return items, by_id
 
-            # Build fuzzy lookup index: normalized "title|artist" -> qobuz item
+            def fetch_spotify():
+                items = []
+                if compare_type == "favorites":
+                    for item, spotify_id, offset, total in spotify_client.iter_saved_tracks():
+                        items.append({
+                            "id": spotify_id,
+                            "title": item['title'],
+                            "artist": item['artist'],
+                            "album": item.get('album', ''),
+                            "isrc": item.get('isrc'),
+                            "total": total
+                        })
+                else:
+                    for item, spotify_id, offset, total in spotify_client.iter_saved_albums():
+                        items.append({
+                            "id": spotify_id,
+                            "title": item['title'],
+                            "artist": item['artist'],
+                            "upc": item.get('upc'),
+                            "total": total
+                        })
+                return items
+
+            # Run both fetches in parallel
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                qobuz_future = executor.submit(fetch_qobuz)
+                spotify_future = executor.submit(fetch_spotify)
+
+                qobuz_items, qobuz_by_id_code = qobuz_future.result()
+                yield send("qobuz_loaded", {"count": len(qobuz_items)})
+
+                spotify_items = spotify_future.result()
+
+            spotify_total = spotify_items[0]["total"] if spotify_items else 0
+            yield send("status", {"phase": "comparing", "message": "Comparing libraries..."})
+
+            # Build title+artist index for O(1) fuzzy lookup
             qobuz_fuzzy_index = {}
             for item in qobuz_items:
                 key = f"{normalize(item['title'])}|{normalize(item['artist'])}"
                 qobuz_fuzzy_index[key] = item
 
-            yield send("qobuz_loaded", {"count": len(qobuz_items)})
-
-            # Phase 2: Stream through Spotify items
-            yield send("status", {"phase": "spotify", "message": "Comparing with Spotify library..."})
-
+            # Compare
             matched_count = 0
             only_spotify_count = 0
             matched_qobuz_ids = set()
-            spotify_total = 0
-
             matched_items = []
             missing_items = []
 
-            if compare_type == "favorites":
-                iterator = spotify_client.iter_saved_tracks()
-            else:
-                iterator = spotify_client.iter_saved_albums()
-
-            batch_size = 50
-            processed = 0
-
-            for item_data in iterator:
-                if compare_type == "favorites":
-                    item, spotify_id, offset, total = item_data
-                    spotify_item = {
-                        "id": spotify_id,
-                        "title": item['title'],
-                        "artist": item['artist'],
-                        "album": item.get('album', ''),
-                        "isrc": item.get('isrc')
-                    }
-                    id_code = spotify_item.get('isrc')
-                else:
-                    item, spotify_id, offset, total = item_data
-                    spotify_item = {
-                        "id": spotify_id,
-                        "title": item['title'],
-                        "artist": item['artist'],
-                        "upc": item.get('upc')
-                    }
-                    id_code = spotify_item.get('upc')
-
-                spotify_total = total
-                processed += 1
+            for spotify_item in spotify_items:
+                id_code = spotify_item.get('isrc') or spotify_item.get('upc')
 
                 # Try exact ID match first (ISRC/UPC)
                 if id_code and id_code in qobuz_by_id_code:
@@ -1117,7 +1116,7 @@ async def compare_stream(compare_type: str):
                         "match_type": "isrc" if compare_type == "favorites" else "upc"
                     })
                 else:
-                    # Try fuzzy match using index
+                    # Try exact title+artist match (O(1) lookup)
                     key = f"{normalize(spotify_item['title'])}|{normalize(spotify_item['artist'])}"
                     if key in qobuz_fuzzy_index:
                         qobuz_item = qobuz_fuzzy_index[key]
@@ -1127,47 +1126,14 @@ async def compare_stream(compare_type: str):
                             matched_items.append({
                                 "spotify": spotify_item,
                                 "qobuz": qobuz_item,
-                                "match_type": "fuzzy",
-                                "score": 100
+                                "match_type": "title"
                             })
                         else:
                             only_spotify_count += 1
                             missing_items.append(spotify_item)
                     else:
-                        # Fallback: slower fuzzy search for close matches
-                        best_match = None
-                        best_score = 0
-                        for qobuz_item in qobuz_items[:500]:  # Limit search for performance
-                            if qobuz_item['id'] in matched_qobuz_ids:
-                                continue
-                            title_score = fuzz.ratio(normalize(spotify_item['title']), normalize(qobuz_item['title']))
-                            artist_score = fuzz.ratio(normalize(spotify_item['artist']), normalize(qobuz_item['artist']))
-                            combined = (title_score + artist_score) / 2
-                            if combined > best_score and combined >= 85:
-                                best_score = combined
-                                best_match = qobuz_item
-
-                        if best_match:
-                            matched_count += 1
-                            matched_qobuz_ids.add(best_match['id'])
-                            matched_items.append({
-                                "spotify": spotify_item,
-                                "qobuz": best_match,
-                                "match_type": "fuzzy",
-                                "score": round(best_score, 1)
-                            })
-                        else:
-                            only_spotify_count += 1
-                            missing_items.append(spotify_item)
-
-                # Send progress updates in batches
-                if processed % batch_size == 0:
-                    yield send("progress", {
-                        "processed": processed,
-                        "total": spotify_total,
-                        "matched": matched_count,
-                        "missing": only_spotify_count
-                    })
+                        only_spotify_count += 1
+                        missing_items.append(spotify_item)
 
             # Calculate only_qobuz
             only_qobuz = [item for item in qobuz_items if item['id'] not in matched_qobuz_ids]
