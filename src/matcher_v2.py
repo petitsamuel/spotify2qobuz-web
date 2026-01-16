@@ -84,6 +84,9 @@ class TrackMatcherV2:
         result, _ = self.match_track_with_suggestions(spotify_track)
         return result
 
+    # Minimum artist score required for suggestions (filter out wrong artists)
+    MIN_ARTIST_SCORE_FOR_SUGGESTION = 50
+
     def match_track_with_suggestions(
         self,
         spotify_track: Dict,
@@ -109,14 +112,18 @@ class TrackMatcherV2:
             spotify_track['artist']
         )
 
-        # Score all candidates
+        # Score all candidates with detailed breakdown
         scored_candidates = []
         for candidate in candidates:
-            score = self._score_candidate(spotify_track, candidate)
+            title_score, artist_score, combined = self._score_candidate_detailed(
+                spotify_track, candidate
+            )
             duration_diff = abs(spotify_track['duration'] - candidate['duration'])
             scored_candidates.append({
                 'candidate': candidate,
-                'score': score,
+                'score': combined,
+                'title_score': title_score,
+                'artist_score': artist_score,
                 'duration_diff': duration_diff
             })
 
@@ -145,18 +152,24 @@ class TrackMatcherV2:
         if result:
             return result, []
 
-        # No match - return suggestions
+        # No match - return suggestions (filtered by minimum artist score)
         suggestions = []
-        for sc in scored_candidates[:5]:  # Top 5 suggestions
-            if sc['score'] >= suggestion_threshold:
+        for sc in scored_candidates[:10]:  # Check more candidates
+            # Require minimum artist match to filter out wrong artists
+            if (sc['score'] >= suggestion_threshold and
+                sc['artist_score'] >= self.MIN_ARTIST_SCORE_FOR_SUGGESTION):
                 suggestions.append({
                     'qobuz_id': sc['candidate']['id'],
                     'title': sc['candidate']['title'],
                     'artist': sc['candidate']['artist'],
                     'album': sc['candidate']['album'],
                     'score': round(sc['score'], 1),
+                    'title_score': round(sc['title_score'], 1),
+                    'artist_score': round(sc['artist_score'], 1),
                     'duration_diff_sec': round(sc['duration_diff'] / 1000, 1)
                 })
+                if len(suggestions) >= 5:
+                    break
 
         return None, suggestions
 
@@ -344,6 +357,17 @@ class TrackMatcherV2:
     def _score_candidate(self, spotify_track: Dict, candidate: Dict) -> float:
         """
         Score a candidate track against the Spotify track.
+        Returns combined score only (for backwards compatibility).
+        """
+        _, _, combined = self._score_candidate_detailed(spotify_track, candidate)
+        return combined
+
+    def _score_candidate_detailed(
+        self, spotify_track: Dict, candidate: Dict
+    ) -> Tuple[float, float, float]:
+        """
+        Score a candidate track against the Spotify track.
+        Returns (title_score, artist_score, combined_score).
         Uses multiple fuzzy algorithms, featured artist matching, and weights.
         """
         spotify_title = self._normalize(spotify_track['title'])
@@ -390,8 +414,8 @@ class TrackMatcherV2:
 
         artist_score = max(artist_scores)
 
-        # Combined score (title weighted more heavily)
-        combined = (title_score * 0.6) + (artist_score * 0.4)
+        # Combined score - equal weighting (50/50) for better artist matching
+        combined = (title_score * 0.5) + (artist_score * 0.5)
 
         # Bonus for matching album
         spotify_album = self._normalize(spotify_track.get('album', ''))
@@ -401,7 +425,7 @@ class TrackMatcherV2:
             if album_score > 80:
                 combined = min(100, combined + 5)
 
-        return combined
+        return title_score, artist_score, combined
 
     def _fuzzy_score(self, s1: str, s2: str) -> float:
         """

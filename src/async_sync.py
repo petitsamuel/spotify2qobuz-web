@@ -43,7 +43,8 @@ class ProgressCallback:
             self.callback(self.to_dict())
 
     def add_missing_track(self, track: Dict):
-        """Add a missing track to recent list."""
+        """Add a missing track to recent list (includes suggestions if available)."""
+        # Track can include: title, artist, album, spotify_id, suggestions
         self.recent_missing.append(track)
         if len(self.recent_missing) > self.max_recent_missing:
             self.recent_missing.pop(0)
@@ -297,6 +298,7 @@ class AsyncSyncService:
             "tracks_matched": 0,
             "tracks_not_matched": 0,
             "tracks_skipped": 0,
+            "tracks_already_in_qobuz": 0,
             "isrc_matches": 0,
             "fuzzy_matches": 0,
             "missing_tracks": [],
@@ -310,10 +312,11 @@ class AsyncSyncService:
         FAVORITE_BATCH = 25 # Tracks per Qobuz favorite API call
 
         try:
-            # Get existing Qobuz favorites once
-            existing_favorites = set()
-            if not dry_run:
-                existing_favorites = set(self.qobuz_client.get_favorite_tracks())
+            # Pre-fetch Qobuz favorites with ISRCs for fast pre-matching
+            # This avoids expensive API calls for tracks already in Qobuz
+            logger.info("Pre-fetching Qobuz favorites for diff computation...")
+            qobuz_isrc_map = self.qobuz_client.get_favorite_tracks_with_isrc()
+            existing_favorites = set(qobuz_isrc_map.values())
 
             self.progress.update(
                 total_playlists=1,
@@ -333,6 +336,13 @@ class AsyncSyncService:
                     track, spotify_id = item
                     if spotify_id in already_synced:
                         return ('skipped', spotify_id, track, None, [])
+
+                    # Fast path: check if ISRC already exists in Qobuz favorites
+                    isrc = track.get('isrc')
+                    if isrc and isrc in qobuz_isrc_map:
+                        # Already in Qobuz - no need to match or add
+                        return ('already_in_qobuz', spotify_id, track, qobuz_isrc_map[isrc], [])
+
                     match_result, suggestions = self.matcher.match_track_with_suggestions(track)
                     status = 'matched' if match_result else 'not_matched'
                     return (status, spotify_id, track, match_result, suggestions)
@@ -424,6 +434,17 @@ class AsyncSyncService:
             report["tracks_skipped"] += 1
             return
 
+        if status == 'already_in_qobuz':
+            # Track already exists in Qobuz favorites (matched by ISRC)
+            report["tracks_already_in_qobuz"] += 1
+            report["tracks_matched"] += 1
+            report["isrc_matches"] += 1
+            self.progress.update(
+                tracks_matched=report["tracks_matched"],
+                isrc_matches=report["isrc_matches"]
+            )
+            return
+
         if status == 'matched' and match_result:
             report["tracks_matched"] += 1
             self.progress.update(tracks_matched=report["tracks_matched"])
@@ -460,10 +481,273 @@ class AsyncSyncService:
                 "suggestions": suggestions
             }
             report["missing_tracks"].append(missing_track)
-            # Add to live progress for real-time display
-            self.progress.add_missing_track({
-                "title": track['title'],
-                "artist": track['artist']
-            })
+            # Add to live progress for real-time display (with full suggestions)
+            self.progress.add_missing_track(missing_track)
             self.progress.update()  # Trigger callback with updated missing tracks
+
+    async def sync_albums(
+        self,
+        dry_run: bool = False,
+        already_synced: set = None,
+        on_album_synced: Callable = None
+    ) -> Dict:
+        """
+        Sync saved albums from Spotify to Qobuz favorites.
+
+        Args:
+            dry_run: If True, don't make any changes
+            already_synced: Set of Spotify album IDs that are already synced (for resume)
+            on_album_synced: Callback(spotify_id, qobuz_id) called after each album is synced
+        """
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            self._executor,
+            self._sync_albums_streaming,
+            dry_run,
+            already_synced or set(),
+            on_album_synced
+        )
+
+    def _sync_albums_streaming(
+        self,
+        dry_run: bool,
+        already_synced: set,
+        on_album_synced: Callable
+    ) -> Dict:
+        """High-performance parallel album sync."""
+        report = {
+            "started_at": datetime.now().isoformat(),
+            "completed_at": None,
+            "albums_matched": 0,
+            "albums_not_matched": 0,
+            "albums_skipped": 0,
+            "albums_already_in_qobuz": 0,
+            "upc_matches": 0,
+            "fuzzy_matches": 0,
+            "missing_albums": [],
+            "synced_albums": [],
+            "errors": []
+        }
+
+        # Tuning parameters
+        MATCH_WORKERS = 25
+        BATCH_SIZE = 50
+        FAVORITE_BATCH = 25
+
+        try:
+            # Pre-fetch Qobuz favorite albums with UPCs for fast pre-matching
+            logger.info("Pre-fetching Qobuz favorite albums for diff computation...")
+            qobuz_upc_map = self.qobuz_client.get_favorite_albums_with_upc()
+            existing_favorites = set(qobuz_upc_map.values())
+
+            self.progress.update(
+                total_playlists=1,
+                current_playlist="Saved Albums",
+                current_playlist_index=1,
+                total_tracks=0
+            )
+
+            with ThreadPoolExecutor(max_workers=MATCH_WORKERS) as executor:
+                album_index = 0
+                batch = []
+                pending_favorites = []
+
+                def match_album(item):
+                    """Match a single album - runs in thread pool."""
+                    album, spotify_id = item
+                    if spotify_id in already_synced:
+                        return ('skipped', spotify_id, album, None)
+
+                    # Fast path: check if UPC already exists in Qobuz favorites
+                    upc = album.get('upc')
+                    if upc and upc in qobuz_upc_map:
+                        # Already in Qobuz - no need to match or add
+                        return ('already_in_qobuz', spotify_id, album, {'id': qobuz_upc_map[upc]})
+
+                    # Try UPC match via search API (for albums not in favorites but on Qobuz)
+                    if upc:
+                        qobuz_album = self.qobuz_client.search_album_by_upc(upc)
+                        if qobuz_album:
+                            return ('matched_upc', spotify_id, album, qobuz_album)
+
+                    # Fuzzy match by title and artist
+                    candidates = self.qobuz_client.search_album(album['title'], album['artist'])
+                    if candidates:
+                        # Find best match using fuzzy matching
+                        best_match = self._find_best_album_match(album, candidates)
+                        if best_match:
+                            return ('matched_fuzzy', spotify_id, album, best_match)
+
+                    return ('not_matched', spotify_id, album, None)
+
+                def flush_favorites():
+                    """Batch add pending favorites to Qobuz."""
+                    nonlocal pending_favorites
+                    if pending_favorites and not dry_run:
+                        album_ids = [f['qobuz_id'] for f in pending_favorites]
+                        self.qobuz_client.add_favorite_albums_batch(album_ids)
+                        for f in pending_favorites:
+                            if on_album_synced:
+                                on_album_synced(f['spotify_id'], str(f['qobuz_id']))
+                        pending_favorites = []
+
+                # Stream albums from Spotify
+                for album, spotify_id, offset, total in self.spotify_client.iter_saved_albums():
+                    if self._cancelled:
+                        logger.info("Album sync cancelled by user")
+                        report["errors"].append("Cancelled by user")
+                        break
+
+                    if album_index == 0:
+                        self.progress.update(total_tracks=total)
+
+                    album_index += 1
+                    batch.append((album, spotify_id))
+
+                    # Process batch when full
+                    if len(batch) >= BATCH_SIZE:
+                        futures = [executor.submit(match_album, item) for item in batch]
+                        results = [f.result() for f in futures]
+
+                        for status, sid, alb, qobuz_album in results:
+                            self._process_album_result(
+                                status, sid, alb, qobuz_album,
+                                report, existing_favorites, pending_favorites
+                            )
+
+                        if len(pending_favorites) >= FAVORITE_BATCH:
+                            flush_favorites()
+
+                        self.progress.update(current_track_index=album_index)
+                        batch = []
+
+                # Process remaining albums
+                if batch:
+                    futures = [executor.submit(match_album, item) for item in batch]
+                    results = [f.result() for f in futures]
+
+                    for status, sid, alb, qobuz_album in results:
+                        self._process_album_result(
+                            status, sid, alb, qobuz_album,
+                            report, existing_favorites, pending_favorites
+                        )
+
+                    self.progress.update(current_track_index=album_index)
+
+                # Flush any remaining favorites
+                flush_favorites()
+
+            report["completed_at"] = datetime.now().isoformat()
+
+        except Exception as e:
+            logger.error(f"Album sync failed: {e}")
+            report["errors"].append(str(e))
+            report["completed_at"] = datetime.now().isoformat()
+
+        return report
+
+    def _find_best_album_match(self, spotify_album: Dict, candidates: List[Dict]) -> Optional[Dict]:
+        """Find the best matching Qobuz album from candidates using fuzzy matching."""
+        try:
+            from rapidfuzz import fuzz
+        except ImportError:
+            # Fallback to first candidate if rapidfuzz not available
+            return candidates[0] if candidates else None
+
+        best_match = None
+        best_score = 0
+
+        spotify_title = spotify_album['title'].lower()
+        spotify_artist = spotify_album['artist'].lower()
+
+        for candidate in candidates:
+            title_score = fuzz.ratio(spotify_title, candidate['title'].lower())
+            artist_score = fuzz.ratio(spotify_artist, candidate['artist'].lower())
+
+            # Weighted average favoring title
+            combined_score = (title_score * 0.6) + (artist_score * 0.4)
+
+            # Bonus for matching release year
+            if spotify_album.get('release_year') and candidate.get('release_year'):
+                if spotify_album['release_year'] == candidate['release_year']:
+                    combined_score += 10
+
+            # Bonus for similar track count
+            if spotify_album.get('total_tracks') and candidate.get('tracks_count'):
+                track_diff = abs(spotify_album['total_tracks'] - candidate['tracks_count'])
+                if track_diff == 0:
+                    combined_score += 5
+                elif track_diff <= 2:
+                    combined_score += 2
+
+            if combined_score > best_score and combined_score >= 70:
+                best_score = combined_score
+                best_match = candidate
+
+        return best_match
+
+    def _process_album_result(
+        self,
+        status: str,
+        spotify_id: str,
+        album: Dict,
+        qobuz_album: Optional[Dict],
+        report: Dict,
+        existing_favorites: set,
+        pending_favorites: List
+    ):
+        """Process a single album match result."""
+        if status == 'skipped':
+            report["albums_skipped"] += 1
+            return
+
+        if status == 'already_in_qobuz':
+            # Album already exists in Qobuz favorites (matched by UPC)
+            report["albums_matched"] += 1
+            report["upc_matches"] += 1
+            report["albums_already_in_qobuz"] += 1
+            self.progress.update(
+                tracks_matched=report["albums_matched"],
+                isrc_matches=report["upc_matches"]
+            )
+            return
+
+        if status.startswith('matched') and qobuz_album:
+            report["albums_matched"] += 1
+            self.progress.update(tracks_matched=report["albums_matched"])
+
+            if status == 'matched_upc':
+                report["upc_matches"] += 1
+                self.progress.update(isrc_matches=report["upc_matches"])
+            else:
+                report["fuzzy_matches"] += 1
+                self.progress.update(fuzzy_matches=report["fuzzy_matches"])
+
+            qobuz_album_id = qobuz_album['id']
+
+            if qobuz_album_id not in existing_favorites:
+                pending_favorites.append({
+                    'spotify_id': spotify_id,
+                    'qobuz_id': qobuz_album_id
+                })
+                existing_favorites.add(qobuz_album_id)
+
+            report["synced_albums"].append({
+                "spotify_id": spotify_id,
+                "qobuz_id": str(qobuz_album_id)
+            })
+        else:
+            report["albums_not_matched"] += 1
+            self.progress.update(tracks_not_matched=report["albums_not_matched"])
+            missing_album = {
+                "spotify_id": spotify_id,
+                "title": album['title'],
+                "artist": album['artist']
+            }
+            report["missing_albums"].append(missing_album)
+            self.progress.add_missing_track({
+                "title": album['title'],
+                "artist": album['artist']
+            })
+            self.progress.update()
 

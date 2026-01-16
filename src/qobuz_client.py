@@ -563,7 +563,77 @@ class QobuzClient:
         except requests.exceptions.RequestException as e:
             logger.error(f"Failed to get favorites count: {e}")
             return 0
-    
+
+    def get_favorite_tracks_with_isrc(self, limit: int = 5000) -> Dict[str, int]:
+        """
+        Get favorite tracks with their ISRCs for pre-matching.
+
+        Returns:
+            Dict mapping ISRC → Qobuz track ID
+        """
+        try:
+            url = f"{self.BASE_URL}/favorite/getUserFavorites"
+            params = {
+                "type": "tracks",
+                "limit": limit,
+                "offset": 0
+            }
+
+            response = self._session.get(url, params=params, timeout=60)
+            response.raise_for_status()
+
+            data = response.json()
+            isrc_map = {}
+
+            if 'tracks' in data and 'items' in data['tracks']:
+                for item in data['tracks']['items']:
+                    isrc = item.get('isrc')
+                    track_id = item.get('id')
+                    if isrc and track_id:
+                        isrc_map[isrc] = track_id
+
+            logger.info(f"Retrieved {len(isrc_map)} favorite tracks with ISRCs from Qobuz")
+            return isrc_map
+
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Failed to get favorite tracks with ISRC: {e}")
+            return {}
+
+    def get_favorite_albums_with_upc(self, limit: int = 5000) -> Dict[str, str]:
+        """
+        Get favorite albums with their UPCs for pre-matching.
+
+        Returns:
+            Dict mapping UPC → Qobuz album ID
+        """
+        try:
+            url = f"{self.BASE_URL}/favorite/getUserFavorites"
+            params = {
+                "type": "albums",
+                "limit": limit,
+                "offset": 0
+            }
+
+            response = self._session.get(url, params=params, timeout=60)
+            response.raise_for_status()
+
+            data = response.json()
+            upc_map = {}
+
+            if 'albums' in data and 'items' in data['albums']:
+                for item in data['albums']['items']:
+                    upc = item.get('upc')
+                    album_id = item.get('id')
+                    if upc and album_id:
+                        upc_map[upc] = album_id
+
+            logger.info(f"Retrieved {len(upc_map)} favorite albums with UPCs from Qobuz")
+            return upc_map
+
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Failed to get favorite albums with UPC: {e}")
+            return {}
+
     def add_favorite_track(self, track_id: int) -> bool:
         """
         Add a track to user's favorites.
@@ -635,10 +705,10 @@ class QobuzClient:
     def is_track_favorited(self, track_id: int) -> bool:
         """
         Check if a track is in user's favorites.
-        
+
         Args:
             track_id: Qobuz track ID to check
-        
+
         Returns:
             True if track is favorited, False otherwise
         """
@@ -646,4 +716,204 @@ class QobuzClient:
             favorites = self.get_favorite_tracks()
             return track_id in favorites
         except Exception:
+            return False
+
+    # --- Album Methods ---
+
+    def search_album(self, title: str, artist: str) -> List[Dict]:
+        """
+        Search for albums by title and artist.
+
+        Args:
+            title: Album title
+            artist: Artist name
+
+        Returns:
+            List of album dictionaries with keys: id, title, artist, release_year, tracks_count
+        """
+        try:
+            query = f"{title} {artist}"
+            params = {
+                'query': query,
+                'limit': 10
+            }
+
+            data = self._make_request('album/search', params)
+
+            albums = []
+            if data.get('albums', {}).get('items'):
+                for item in data['albums']['items']:
+                    album = {
+                        'id': item['id'],
+                        'title': item.get('title', ''),
+                        'artist': item.get('artist', {}).get('name', 'Unknown'),
+                        'release_year': str(item.get('released_at', ''))[:4] if item.get('released_at') else None,
+                        'tracks_count': item.get('tracks_count', 0),
+                        'upc': item.get('upc')
+                    }
+                    albums.append(album)
+
+            logger.debug(f"Found {len(albums)} albums for query: {query}")
+            return albums
+
+        except Exception as e:
+            logger.error(f"Error searching albums for {title} - {artist}: {e}")
+            return []
+
+    def search_album_by_upc(self, upc: str) -> Optional[Dict]:
+        """
+        Search for an album by UPC code.
+
+        Args:
+            upc: UPC barcode
+
+        Returns:
+            Album dictionary or None if not found
+        """
+        try:
+            params = {
+                'query': upc,
+                'limit': 5
+            }
+
+            data = self._make_request('album/search', params)
+
+            if data.get('albums', {}).get('items'):
+                for item in data['albums']['items']:
+                    # Check for exact UPC match
+                    if item.get('upc') and item['upc'] == upc:
+                        return {
+                            'id': item['id'],
+                            'title': item.get('title', ''),
+                            'artist': item.get('artist', {}).get('name', 'Unknown'),
+                            'release_year': str(item.get('released_at', ''))[:4] if item.get('released_at') else None,
+                            'tracks_count': item.get('tracks_count', 0),
+                            'upc': item.get('upc')
+                        }
+
+            logger.debug(f"No exact UPC match found for: {upc}")
+            return None
+
+        except Exception as e:
+            logger.error(f"Error searching by UPC {upc}: {e}")
+            return None
+
+    def get_favorite_albums(self, limit: int = 5000) -> List[int]:
+        """
+        Get all favorite/liked album IDs for the authenticated user.
+
+        Args:
+            limit: Maximum number of favorites to retrieve
+
+        Returns:
+            List of album IDs that are favorited
+        """
+        try:
+            url = f"{self.BASE_URL}/favorite/getUserFavorites"
+            params = {
+                "type": "albums",
+                "limit": limit,
+                "offset": 0
+            }
+
+            response = self._session.get(url, params=params, timeout=30)
+            response.raise_for_status()
+
+            data = response.json()
+            album_ids = []
+
+            if 'albums' in data and 'items' in data['albums']:
+                for item in data['albums']['items']:
+                    if 'id' in item:
+                        album_ids.append(item['id'])
+
+            logger.info(f"Retrieved {len(album_ids)} favorite albums from Qobuz")
+            return album_ids
+
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Failed to get favorite albums: {e}")
+            return []
+
+    def get_favorite_albums_count(self) -> int:
+        """Get total count of favorite albums without fetching all."""
+        try:
+            url = f"{self.BASE_URL}/favorite/getUserFavorites"
+            params = {
+                "type": "albums",
+                "limit": 1,
+                "offset": 0
+            }
+
+            response = self._session.get(url, params=params, timeout=10)
+            response.raise_for_status()
+
+            data = response.json()
+            return data.get('albums', {}).get('total', 0)
+
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Failed to get favorite albums count: {e}")
+            return 0
+
+    def add_favorite_album(self, album_id: int) -> bool:
+        """
+        Add an album to user's favorites.
+
+        Args:
+            album_id: Qobuz album ID to favorite
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            url = f"{self.BASE_URL}/favorite/create"
+            params = {
+                "album_ids": str(album_id)
+            }
+
+            response = self._session.post(url, params=params, timeout=10)
+
+            # Qobuz may return 400 if already favorited
+            if response.status_code == 400:
+                logger.debug(f"Album {album_id} is already favorited")
+                return True
+
+            response.raise_for_status()
+            logger.debug(f"Added album {album_id} to favorites")
+            return True
+
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Failed to add album {album_id} to favorites: {e}")
+            return False
+
+    def add_favorite_albums_batch(self, album_ids: List[int]) -> bool:
+        """
+        Add multiple albums to user's favorites in a single API call.
+
+        Args:
+            album_ids: List of Qobuz album IDs to favorite
+
+        Returns:
+            True if successful, False otherwise
+        """
+        if not album_ids:
+            return True
+
+        try:
+            url = f"{self.BASE_URL}/favorite/create"
+            params = {
+                "album_ids": ",".join(str(aid) for aid in album_ids)
+            }
+
+            response = self._session.post(url, params=params, timeout=30)
+
+            if response.status_code == 400:
+                logger.debug(f"Some albums already favorited")
+                return True
+
+            response.raise_for_status()
+            logger.debug(f"Added {len(album_ids)} albums to favorites in batch")
+            return True
+
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Failed to batch add favorite albums: {e}")
             return False

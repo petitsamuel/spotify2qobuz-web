@@ -43,7 +43,7 @@
                 <div class="w-8 h-8 border-2 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
                 <div>
                     <div class="flex items-center gap-2">
-                        <h2 class="font-semibold" x-text="syncType === 'favorites' ? 'Syncing Saved Tracks' : 'Syncing Playlists'"></h2>
+                        <h2 class="font-semibold" x-text="syncType === 'favorites' ? 'Syncing Saved Tracks' : (syncType === 'albums' ? 'Syncing Saved Albums' : 'Syncing Playlists')"></h2>
                         <span x-show="dryRun" class="px-1.5 py-0.5 rounded text-xs bg-yellow-600/30 text-yellow-400">DRY RUN</span>
                     </div>
                     <p class="text-sm text-gray-400" x-text="progress.current_playlist || 'Starting...'"></p>
@@ -73,7 +73,7 @@
             </div>
             <div class="bg-gray-800/50 rounded-lg p-3">
                 <div class="text-2xl font-bold text-blue-400" x-text="progress.isrc_matches || 0"></div>
-                <div class="text-xs text-gray-400">ISRC Match</div>
+                <div class="text-xs text-gray-400" x-text="syncType === 'albums' ? 'UPC Match' : 'ISRC Match'"></div>
             </div>
             <div class="bg-gray-800/50 rounded-lg p-3">
                 <div class="text-2xl font-bold text-purple-400" x-text="progress.fuzzy_matches || 0"></div>
@@ -81,7 +81,7 @@
             </div>
             <div class="bg-gray-800/50 rounded-lg p-3">
                 <div class="text-2xl font-bold text-gray-300" x-text="(progress.current_track_index || 0) + '/' + (progress.total_tracks || 0)"></div>
-                <div class="text-xs text-gray-400">Current Track</div>
+                <div class="text-xs text-gray-400" x-text="syncType === 'albums' ? 'Current Album' : 'Current Track'"></div>
             </div>
         </div>
 
@@ -91,7 +91,7 @@
             <span class="text-2xl font-bold" :class="matchRateColor" x-text="matchRate.toFixed(1) + '%'"></span>
         </div>
 
-        <!-- Live Missing Tracks -->
+        <!-- Live Missing Tracks with Suggestions -->
         <div x-show="progress.recent_missing && progress.recent_missing.length > 0" class="mt-4">
             <button @click="showLiveMissing = !showLiveMissing"
                     class="w-full flex items-center justify-between bg-yellow-900/20 rounded-lg p-2 hover:bg-yellow-900/30 transition">
@@ -102,13 +102,44 @@
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>
                 </svg>
             </button>
-            <div x-show="showLiveMissing" class="mt-2 bg-gray-800/50 rounded-lg max-h-48 overflow-y-auto">
+            <div x-show="showLiveMissing" class="mt-2 bg-gray-800/50 rounded-lg max-h-72 overflow-y-auto">
                 <div class="divide-y divide-gray-700/30">
-                    <template x-for="(track, idx) in (progress.recent_missing || []).slice().reverse()" :key="idx">
-                        <div class="px-3 py-2 text-sm">
-                            <span class="text-white" x-text="track.title"></span>
-                            <span class="text-gray-500"> - </span>
-                            <span class="text-gray-400" x-text="track.artist"></span>
+                    <template x-for="(track, idx) in (progress.recent_missing || []).slice().reverse()" :key="track.spotify_id || idx">
+                        <div class="p-3">
+                            <!-- Track Info -->
+                            <div class="flex items-center justify-between">
+                                <div>
+                                    <span class="text-white font-medium" x-text="track.title"></span>
+                                    <span class="text-gray-400"> by </span>
+                                    <span class="text-gray-300" x-text="track.artist"></span>
+                                    <span x-show="track.album" class="text-gray-500 text-xs ml-1" x-text="'(' + track.album + ')'"></span>
+                                </div>
+                            </div>
+                            <!-- Live Suggestions -->
+                            <div x-show="track.suggestions && track.suggestions.length > 0" class="mt-2 ml-4 space-y-1">
+                                <template x-for="(sug, sidx) in track.suggestions.slice(0, 3)" :key="sug.qobuz_id">
+                                    <div class="flex items-center justify-between bg-gray-700/30 rounded p-2 text-xs">
+                                        <div class="flex-1 truncate">
+                                            <span class="text-white" x-text="sug.title"></span>
+                                            <span class="text-gray-400"> by </span>
+                                            <span class="text-gray-300" x-text="sug.artist"></span>
+                                            <span class="ml-1 px-1 py-0.5 rounded text-xs"
+                                                  :class="(sug.title_score || sug.score) >= 80 ? 'bg-green-600/30 text-green-400' : 'bg-yellow-600/30 text-yellow-400'"
+                                                  x-text="'T:' + (sug.title_score || sug.score) + '%'"></span>
+                                            <span class="ml-0.5 px-1 py-0.5 rounded text-xs"
+                                                  :class="(sug.artist_score || sug.score) >= 80 ? 'bg-green-600/30 text-green-400' : 'bg-yellow-600/30 text-yellow-400'"
+                                                  x-text="'A:' + (sug.artist_score || sug.score) + '%'"></span>
+                                        </div>
+                                        <button @click="approveSuggestion(track, sug)"
+                                                class="ml-2 px-2 py-1 bg-green-600 hover:bg-green-500 rounded text-xs text-white whitespace-nowrap">
+                                            Add
+                                        </button>
+                                    </div>
+                                </template>
+                            </div>
+                            <div x-show="!track.suggestions || track.suggestions.length === 0" class="mt-1 ml-4 text-xs text-gray-500">
+                                No suggestions
+                            </div>
                         </div>
                     </template>
                 </div>
@@ -127,7 +158,7 @@
                 </div>
                 <div>
                     <h2 class="font-semibold text-lg">Sync Complete!</h2>
-                    <p class="text-sm text-gray-400" x-text="syncType === 'favorites' ? 'Saved tracks synced to Qobuz' : 'Playlists synced to Qobuz'"></p>
+                    <p class="text-sm text-gray-400" x-text="syncType === 'favorites' ? 'Saved tracks synced to Qobuz' : (syncType === 'albums' ? 'Albums synced to Qobuz' : 'Playlists synced to Qobuz')"></p>
                 </div>
             </div>
             <button @click="dismissCompleted()" class="text-gray-400 hover:text-white">
@@ -149,7 +180,7 @@
             </div>
             <div class="bg-gray-800/50 rounded-lg p-4 text-center">
                 <div class="text-3xl font-bold text-blue-400" x-text="progress.isrc_matches || 0"></div>
-                <div class="text-sm text-gray-400">ISRC Match</div>
+                <div class="text-sm text-gray-400" x-text="syncType === 'albums' ? 'UPC Match' : 'ISRC Match'"></div>
             </div>
             <div class="bg-gray-800/50 rounded-lg p-4 text-center">
                 <div class="text-3xl font-bold text-purple-400" x-text="progress.fuzzy_matches || 0"></div>
@@ -168,7 +199,7 @@
             <button @click="showMissing = !showMissing"
                     class="w-full flex items-center justify-between bg-gray-800/50 rounded-lg p-3 hover:bg-gray-800 transition">
                 <span class="text-yellow-400 font-medium">
-                    <span x-text="missingTracks.length"></span> tracks not found on Qobuz
+                    <span x-text="missingTracks.length"></span> <span x-text="syncType === 'albums' ? 'albums' : 'tracks'"></span> not found on Qobuz
                     <span class="text-gray-400 text-sm ml-2">(click to review suggestions)</span>
                 </span>
                 <svg class="w-5 h-5 text-gray-400 transition-transform" :class="showMissing ? 'rotate-180' : ''" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -198,9 +229,13 @@
                                             <span class="text-gray-400"> by </span>
                                             <span class="text-gray-300" x-text="sug.artist"></span>
                                             <span class="text-gray-500 text-xs ml-1" x-text="'(' + sug.album + ')'"></span>
+                                            <!-- Score badges: title and artist separately -->
                                             <span class="ml-2 px-1.5 py-0.5 rounded text-xs"
-                                                  :class="sug.score >= 60 ? 'bg-yellow-600/30 text-yellow-400' : 'bg-gray-600/30 text-gray-400'"
-                                                  x-text="sug.score + '% match'"></span>
+                                                  :class="(sug.title_score || sug.score) >= 80 ? 'bg-green-600/30 text-green-400' : (sug.title_score || sug.score) >= 60 ? 'bg-yellow-600/30 text-yellow-400' : 'bg-gray-600/30 text-gray-400'"
+                                                  x-text="'T:' + (sug.title_score || sug.score) + '%'"></span>
+                                            <span class="ml-1 px-1.5 py-0.5 rounded text-xs"
+                                                  :class="(sug.artist_score || sug.score) >= 80 ? 'bg-green-600/30 text-green-400' : (sug.artist_score || sug.score) >= 60 ? 'bg-yellow-600/30 text-yellow-400' : 'bg-gray-600/30 text-gray-400'"
+                                                  x-text="'A:' + (sug.artist_score || sug.score) + '%'"></span>
                                         </div>
                                         <button @click="approveSuggestion(track, sug)"
                                                 class="ml-2 px-3 py-1 bg-green-600 hover:bg-green-500 rounded text-xs text-white">
@@ -230,11 +265,11 @@
             </label>
         </div>
 
-        <div class="grid md:grid-cols-2 gap-4">
+        <div class="grid md:grid-cols-3 gap-4">
             <button @click="startSync('playlists')"
                     class="p-6 bg-gray-800 hover:bg-gray-750 rounded-lg border border-gray-700 hover:border-green-500 transition text-left group">
                 <div class="flex items-center justify-between mb-2">
-                    <h3 class="text-lg font-semibold group-hover:text-green-400 transition">Sync All Playlists</h3>
+                    <h3 class="text-lg font-semibold group-hover:text-green-400 transition">Sync Playlists</h3>
                     <svg class="w-5 h-5 text-gray-500 group-hover:text-green-400 transition" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14 5l7 7m0 0l-7 7m7-7H3"></path>
                     </svg>
@@ -252,6 +287,18 @@
                     </svg>
                 </div>
                 <p class="text-sm text-gray-400">Transfer <span x-text="spotifyStats.savedTracks"></span> liked songs to Qobuz favorites</p>
+                <p x-show="dryRun" class="text-xs text-yellow-400 mt-1">Preview mode - no changes will be made</p>
+            </button>
+
+            <button @click="startSync('albums')"
+                    class="p-6 bg-gray-800 hover:bg-gray-750 rounded-lg border border-gray-700 hover:border-purple-500 transition text-left group">
+                <div class="flex items-center justify-between mb-2">
+                    <h3 class="text-lg font-semibold group-hover:text-purple-400 transition">Sync Saved Albums</h3>
+                    <svg class="w-5 h-5 text-gray-500 group-hover:text-purple-400 transition" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19V6l12-3v13M9 19c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zm12-3c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zM9 10l12-3"></path>
+                    </svg>
+                </div>
+                <p class="text-sm text-gray-400">Transfer <span x-text="spotifyStats.savedAlbums"></span> saved albums to Qobuz</p>
                 <p x-show="dryRun" class="text-xs text-yellow-400 mt-1">Preview mode - no changes will be made</p>
             </button>
         </div>
@@ -278,6 +325,10 @@
                 <div class="flex justify-between">
                     <span class="text-gray-400">Saved Tracks</span>
                     <span class="font-semibold" x-text="spotifyStats.savedTracks"></span>
+                </div>
+                <div class="flex justify-between">
+                    <span class="text-gray-400">Saved Albums</span>
+                    <span class="font-semibold" x-text="spotifyStats.savedAlbums"></span>
                 </div>
                 <div class="pt-2 border-t border-gray-700">
                     <a href="/playlists" class="text-sm text-green-400 hover:underline">View & select playlists →</a>
@@ -307,6 +358,10 @@
                     <span class="text-gray-400">Favorite Tracks</span>
                     <span class="font-semibold" x-text="qobuzStats.favorites"></span>
                 </div>
+                <div class="flex justify-between">
+                    <span class="text-gray-400">Favorite Albums</span>
+                    <span class="font-semibold" x-text="qobuzStats.favoriteAlbums"></span>
+                </div>
             </div>
         </div>
     </div>
@@ -332,7 +387,10 @@
     <div class="bg-gray-800 rounded-lg border border-gray-700 overflow-hidden">
         <div class="border-b border-gray-700 px-4 py-3 flex items-center justify-between">
             <h3 class="font-semibold">Recent Migrations</h3>
-            <a href="/history" class="text-sm text-blue-400 hover:underline">View all</a>
+            <div class="flex items-center gap-4">
+                <a href="/review" class="text-sm text-yellow-400 hover:underline">Review unmatched</a>
+                <a href="/history" class="text-sm text-blue-400 hover:underline">View all</a>
+            </div>
         </div>
         <div class="divide-y divide-gray-700">
             {% for migration in migrations[:5] %}
@@ -379,8 +437,8 @@ function syncApp() {
         progress: {},
         finalReport: null,
         dryRun: false,
-        spotifyStats: { playlists: '...', savedTracks: '...' },
-        qobuzStats: { playlists: '...', fromSpotify: '...', favorites: '...' },
+        spotifyStats: { playlists: '...', savedTracks: '...', savedAlbums: '...' },
+        qobuzStats: { playlists: '...', fromSpotify: '...', favorites: '...', favoriteAlbums: '...' },
 
         get missingTracks() {
             return this.finalReport?.missing_tracks || [];
