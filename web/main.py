@@ -35,6 +35,8 @@ async def lifespan(app: FastAPI):
     global storage
     storage = Storage()
     await storage.init_db()
+    # Clean up any stale "running" tasks from previous crashes
+    await storage.cleanup_stale_tasks()
     yield
 
 

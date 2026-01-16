@@ -416,6 +416,10 @@ function syncApp() {
                     } else if (data.status === 'failed') {
                         this.syncing = false;
                         alert('Sync failed: ' + (data.error || 'Unknown error'));
+                    } else if (data.status === 'interrupted') {
+                        this.syncing = false;
+                        this.completed = true;
+                        this.finalReport = data.progress || this.progress;
                     } else {
                         setTimeout(poll, 500);
                     }

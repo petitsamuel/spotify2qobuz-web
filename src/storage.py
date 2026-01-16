@@ -311,3 +311,22 @@ class Storage:
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute("DELETE FROM sync_progress WHERE sync_type = ?", (sync_type,))
             await db.commit()
+
+    async def cleanup_stale_tasks(self):
+        """Mark any 'running' tasks as 'interrupted' on startup."""
+        async with aiosqlite.connect(self.db_path) as db:
+            # Update stale tasks
+            await db.execute("""
+                UPDATE sync_tasks
+                SET status = 'interrupted', updated_at = ?
+                WHERE status IN ('running', 'pending', 'starting')
+            """, (datetime.now().isoformat(),))
+
+            # Update stale migrations
+            await db.execute("""
+                UPDATE migrations
+                SET status = 'interrupted', completed_at = ?
+                WHERE status = 'running'
+            """, (datetime.now().isoformat(),))
+
+            await db.commit()
