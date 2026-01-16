@@ -464,26 +464,48 @@ class QobuzClient:
     
     def get_playlist_tracks(self, playlist_id: str) -> List[int]:
         """
-        Get all track IDs in a playlist.
-        
+        Get all track IDs in a playlist (handles pagination).
+
         Args:
             playlist_id: Playlist ID
-            
+
         Returns:
             List of track IDs
         """
         try:
-            playlist_data = self.get_playlist(playlist_id)
-            if not playlist_data or 'tracks' not in playlist_data:
-                return []
-            
             track_ids = []
-            if 'items' in playlist_data['tracks']:
-                track_ids = [track['id'] for track in playlist_data['tracks']['items']]
-            
+            offset = 0
+            limit = 500
+
+            while True:
+                params = {
+                    'playlist_id': playlist_id,
+                    'extra': 'tracks',
+                    'limit': limit,
+                    'offset': offset
+                }
+                data = self._make_request('playlist/get', params)
+
+                if not data or 'tracks' not in data:
+                    break
+
+                tracks_data = data['tracks']
+                items = tracks_data.get('items', [])
+
+                if not items:
+                    break
+
+                track_ids.extend(track['id'] for track in items)
+
+                total = tracks_data.get('total', 0)
+                if len(track_ids) >= total:
+                    break
+
+                offset += limit
+
             logger.debug(f"Found {len(track_ids)} tracks in playlist {playlist_id}")
             return track_ids
-            
+
         except Exception as e:
             logger.error(f"Error getting playlist tracks {playlist_id}: {e}")
             return []
