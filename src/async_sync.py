@@ -12,9 +12,38 @@ try:
 except ImportError:
     from src.matcher import TrackMatcher
 from src.utils.logger import get_logger
+import re
 
 
 logger = get_logger()
+
+
+# Common album edition suffixes to strip when searching for base albums
+EDITION_PATTERNS = [
+    r'\s*\(Deluxe\s*Edition?\)',
+    r'\s*\(Super\s*Deluxe\)',
+    r'\s*\(Deluxe\)',
+    r'\s*\(Expanded\s*Edition?\)',
+    r'\s*\(Special\s*Edition?\)',
+    r'\s*\(Anniversary\s*Edition?\)',
+    r'\s*\(\d+(?:th|st|nd|rd)?\s*Anniversary[^)]*\)',
+    r'\s*\(Remaster(?:ed)?\)',
+    r'\s*\(Remastered\s*\d{4}\)',
+    r'\s*\(Acoustic\)',
+    r'\s*\(Instrumentals?\)',
+    r'\s*\(Live[^)]*\)',
+    r'\s*\(Bonus\s*Track[^)]*\)',
+    r'\s*\(Complete[^)]*\)',
+    r'\s*\(Music\s+for[^)]*\)',
+    r'\s*-\s*Deluxe\s*$',
+    r'\s*-\s*Remastered\s*$',
+]
+EDITION_REGEX = re.compile('|'.join(EDITION_PATTERNS), re.IGNORECASE)
+
+
+def strip_edition_suffix(title: str) -> str:
+    """Strip common edition suffixes from album titles."""
+    return EDITION_REGEX.sub('', title).strip()
 
 
 class ProgressCallback:
@@ -556,19 +585,19 @@ class AsyncSyncService:
                     """Match a single album - runs in thread pool."""
                     album, spotify_id = item
                     if spotify_id in already_synced:
-                        return ('skipped', spotify_id, album, None)
+                        return ('skipped', spotify_id, album, None, [])
 
                     # Fast path: check if UPC already exists in Qobuz favorites
                     upc = album.get('upc')
                     if upc and upc in qobuz_upc_map:
                         # Already in Qobuz - no need to match or add
-                        return ('already_in_qobuz', spotify_id, album, {'id': qobuz_upc_map[upc]})
+                        return ('already_in_qobuz', spotify_id, album, {'id': qobuz_upc_map[upc]}, [])
 
                     # Try UPC match via search API (for albums not in favorites but on Qobuz)
                     if upc:
                         qobuz_album = self.qobuz_client.search_album_by_upc(upc)
                         if qobuz_album:
-                            return ('matched_upc', spotify_id, album, qobuz_album)
+                            return ('matched_upc', spotify_id, album, qobuz_album, [])
 
                     # Fuzzy match by title and artist
                     candidates = self.qobuz_client.search_album(album['title'], album['artist'])
@@ -576,9 +605,32 @@ class AsyncSyncService:
                         # Find best match using fuzzy matching
                         best_match = self._find_best_album_match(album, candidates)
                         if best_match:
-                            return ('matched_fuzzy', spotify_id, album, best_match)
+                            return ('matched_fuzzy', spotify_id, album, best_match, [])
 
-                    return ('not_matched', spotify_id, album, None)
+                    # Fallback: try searching with stripped edition suffix
+                    suggestions = []
+                    base_title = strip_edition_suffix(album['title'])
+                    if base_title != album['title']:
+                        logger.debug(f"Trying base title: '{base_title}' (was: '{album['title']}')")
+                        base_candidates = self.qobuz_client.search_album(base_title, album['artist'])
+                        if base_candidates:
+                            # Check if any is a good match
+                            best_base_match = self._find_best_album_match(
+                                {**album, 'title': base_title}, base_candidates
+                            )
+                            if best_base_match:
+                                # Found a match with base title - use it
+                                return ('matched_fuzzy', spotify_id, album, best_base_match, [])
+                            # Otherwise add as suggestions
+                            suggestions = self._build_album_suggestions(album, base_candidates[:5])
+
+                    # If no match, try artist-only search for suggestions
+                    if not suggestions:
+                        artist_candidates = self.qobuz_client.search_album('', album['artist'])
+                        if artist_candidates:
+                            suggestions = self._build_album_suggestions(album, artist_candidates[:5])
+
+                    return ('not_matched', spotify_id, album, None, suggestions)
 
                 def flush_favorites():
                     """Batch add pending favorites to Qobuz."""
@@ -609,9 +661,9 @@ class AsyncSyncService:
                         futures = [executor.submit(match_album, item) for item in batch]
                         results = [f.result() for f in futures]
 
-                        for status, sid, alb, qobuz_album in results:
+                        for status, sid, alb, qobuz_album, suggestions in results:
                             self._process_album_result(
-                                status, sid, alb, qobuz_album,
+                                status, sid, alb, qobuz_album, suggestions,
                                 report, existing_favorites, pending_favorites
                             )
 
@@ -626,9 +678,9 @@ class AsyncSyncService:
                     futures = [executor.submit(match_album, item) for item in batch]
                     results = [f.result() for f in futures]
 
-                    for status, sid, alb, qobuz_album in results:
+                    for status, sid, alb, qobuz_album, suggestions in results:
                         self._process_album_result(
-                            status, sid, alb, qobuz_album,
+                            status, sid, alb, qobuz_album, suggestions,
                             report, existing_favorites, pending_favorites
                         )
 
@@ -686,12 +738,50 @@ class AsyncSyncService:
 
         return best_match
 
+    def _build_album_suggestions(self, spotify_album: Dict, candidates: List[Dict]) -> List[Dict]:
+        """Build suggestion list from album candidates with match scores."""
+        try:
+            from rapidfuzz import fuzz
+        except ImportError:
+            return []
+
+        suggestions = []
+        spotify_title = spotify_album['title'].lower()
+        spotify_artist = spotify_album['artist'].lower()
+        base_title = strip_edition_suffix(spotify_album['title']).lower()
+
+        for candidate in candidates:
+            candidate_title = candidate['title'].lower()
+            candidate_artist = candidate['artist'].lower()
+
+            # Score against both original and base title, take best
+            title_score = max(
+                fuzz.ratio(spotify_title, candidate_title),
+                fuzz.ratio(base_title, candidate_title)
+            )
+            artist_score = fuzz.ratio(spotify_artist, candidate_artist)
+
+            suggestions.append({
+                'qobuz_id': candidate['id'],
+                'title': candidate['title'],
+                'artist': candidate['artist'],
+                'album': candidate.get('title', ''),
+                'title_score': title_score,
+                'artist_score': artist_score,
+                'score': round((title_score + artist_score) / 2)
+            })
+
+        # Sort by combined score descending
+        suggestions.sort(key=lambda x: x['score'], reverse=True)
+        return suggestions[:5]
+
     def _process_album_result(
         self,
         status: str,
         spotify_id: str,
         album: Dict,
         qobuz_album: Optional[Dict],
+        suggestions: List[Dict],
         report: Dict,
         existing_favorites: set,
         pending_favorites: List
@@ -742,12 +832,15 @@ class AsyncSyncService:
             missing_album = {
                 "spotify_id": spotify_id,
                 "title": album['title'],
-                "artist": album['artist']
+                "artist": album['artist'],
+                "suggestions": suggestions
             }
             report["missing_albums"].append(missing_album)
             self.progress.add_missing_track({
+                "spotify_id": spotify_id,
                 "title": album['title'],
-                "artist": album['artist']
+                "artist": album['artist'],
+                "suggestions": suggestions
             })
             self.progress.update()
 
