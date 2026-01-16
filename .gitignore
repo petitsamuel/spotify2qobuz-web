@@ -61,6 +61,11 @@ sync_logs/
 # Reports
 sync_report_*.json
 
+# SQLite database and encryption keys
+data/
+*.db
+.encryption_key
+
 # Spotify cache
 .cache
 .cache-*

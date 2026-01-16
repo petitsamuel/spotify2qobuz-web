@@ -8,7 +8,11 @@ from datetime import datetime
 from typing import Dict, List
 from src.spotify_client import SpotifyClient
 from src.qobuz_client import QobuzClient
-from src.matcher import TrackMatcher
+# Use improved matcher by default (can switch back to original with use_v2_matcher=False)
+try:
+    from src.matcher_v2 import TrackMatcherV2 as TrackMatcher
+except ImportError:
+    from src.matcher import TrackMatcher
 from src.utils.credentials import parse_credentials
 from src.utils.logger import setup_logger, get_logger
 

@@ -65,6 +65,27 @@ python -m src.sync_service --dry-run true
 
 ### 5. Run the Sync!
 
+#### Option A: Web Interface (Recommended)
+```bash
+# Copy and configure environment
+cp .env.example .env
+# Edit .env with your Spotify credentials
+
+# Install Playwright browsers (first time only)
+playwright install chromium
+
+# Start the web server
+python run_web.py
+```
+
+Open http://localhost:8888 in your browser. The web interface lets you:
+- Connect Spotify via OAuth (no manual token needed)
+- Connect Qobuz automatically via browser login
+- Select specific playlists to sync
+- Watch real-time sync progress
+- View migration history
+
+#### Option B: Command Line
 ```bash
 python sync.py
 ```
@@ -237,18 +258,28 @@ Options:
 SpotifyQobuzSync/
 ├── src/
 │   ├── spotify_client.py         # Spotify API integration
-│   ├── qobuz_client.py           # Qobuz API integration  
+│   ├── qobuz_client.py           # Qobuz API integration
 │   ├── matcher.py                # ISRC + fuzzy matching
 │   ├── sync_service.py           # Playlist sync orchestration
 │   ├── favorite_sync_service.py  # Favorite sync orchestration
+│   ├── async_sync.py             # Async wrapper for web interface
+│   ├── storage.py                # SQLite storage for history
+│   ├── qobuz_auth.py             # Automated Qobuz auth via Playwright
 │   └── utils/
 │       ├── credentials.py        # Credential parsing
 │       └── logger.py             # Logging setup
+├── web/                          # Web interface (NEW)
+│   ├── main.py                   # FastAPI application
+│   ├── templates/                # Jinja2 HTML templates
+│   └── static/                   # CSS/JS assets
 ├── tests/                        # 116 unit tests
 ├── sync_logs/                    # Auto-generated logs
+├── data/                         # SQLite database (gitignored)
 ├── credentials.md                # Your API credentials (gitignored)
+├── .env                          # Environment config (gitignored)
 ├── sync.py                       # Playlist sync script
 ├── sync_favorites.py             # Favorite sync script
+├── run_web.py                    # Web server launcher
 ├── test_token.py                 # Test Qobuz token validity
 ├── extract_token_from_har.py     # Extract token from HAR file
 ├── README.md                     # This file
