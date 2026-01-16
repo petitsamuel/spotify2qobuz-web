@@ -1,0 +1,18 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "buildCommand": "bun install",
+  "installCommand": "curl -fsSL https://bun.sh/install | bash && bun install",
+  "framework": null,
+  "outputDirectory": ".",
+  "functions": {
+    "src/index.ts": {
+      "runtime": "bun@1.1"
+    }
+  },
+  "rewrites": [
+    {
+      "source": "/(.*)",
+      "destination": "/src/index.ts"
+    }
+  ]
+}
