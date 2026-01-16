@@ -13,14 +13,14 @@ export function createApiRoutes(storage: Storage): Hono {
 
   // Spotify stats
   app.get('/spotify/stats', async (c) => {
-    const creds = storage.getCredentials('spotify') as SpotifyCredentials | null;
+    const creds = await storage.getCredentials('spotify') as SpotifyCredentials | null;
     if (!creds) {
       return c.json({ error: 'Spotify not connected' }, 401);
     }
 
     try {
-      const client = new SpotifyClient(creds, (newCreds) => {
-        storage.saveCredentials('spotify', newCreds as unknown as Record<string, unknown>);
+      const client = new SpotifyClient(creds, async (newCreds) => {
+        await storage.saveCredentials('spotify', newCreds as unknown as Record<string, unknown>);
       });
 
       const stats = await client.getStats();
@@ -33,7 +33,7 @@ export function createApiRoutes(storage: Storage): Hono {
 
   // Qobuz stats
   app.get('/qobuz/stats', async (c) => {
-    const creds = storage.getCredentials('qobuz') as { user_auth_token: string } | null;
+    const creds = await storage.getCredentials('qobuz') as { user_auth_token: string } | null;
     if (!creds) {
       return c.json({ error: 'Qobuz not connected' }, 401);
     }
@@ -50,7 +50,7 @@ export function createApiRoutes(storage: Storage): Hono {
 
   // Add track to Qobuz favorites
   app.post('/qobuz/favorite', async (c) => {
-    const creds = storage.getCredentials('qobuz') as { user_auth_token: string } | null;
+    const creds = await storage.getCredentials('qobuz') as { user_auth_token: string } | null;
     if (!creds) {
       return c.json({ error: 'Qobuz not connected' }, 401);
     }
@@ -69,8 +69,8 @@ export function createApiRoutes(storage: Storage): Hono {
 
       if (success && spotifyId) {
         // Mark as synced and resolve unmatched
-        storage.markTrackSynced(spotifyId, qobuzId, 'favorites');
-        storage.resolveUnmatchedTrack(spotifyId, 'favorites', qobuzId, 'resolved');
+        await storage.markTrackSynced(spotifyId, qobuzId, 'favorites');
+        await storage.resolveUnmatchedTrack(spotifyId, 'favorites', qobuzId, 'resolved');
       }
 
       return c.json({ success });
@@ -82,7 +82,7 @@ export function createApiRoutes(storage: Storage): Hono {
 
   // Add album to Qobuz favorites
   app.post('/qobuz/favorite/album', async (c) => {
-    const creds = storage.getCredentials('qobuz') as { user_auth_token: string } | null;
+    const creds = await storage.getCredentials('qobuz') as { user_auth_token: string } | null;
     if (!creds) {
       return c.json({ error: 'Qobuz not connected' }, 401);
     }
@@ -100,8 +100,8 @@ export function createApiRoutes(storage: Storage): Hono {
       const success = await client.addFavoriteAlbum(qobuzId);
 
       if (success && spotifyId) {
-        storage.markTrackSynced(spotifyId, qobuzId, 'albums');
-        storage.resolveUnmatchedTrack(spotifyId, 'albums', qobuzId, 'resolved');
+        await storage.markTrackSynced(spotifyId, qobuzId, 'albums');
+        await storage.resolveUnmatchedTrack(spotifyId, 'albums', qobuzId, 'resolved');
       }
 
       return c.json({ success });
@@ -112,14 +112,14 @@ export function createApiRoutes(storage: Storage): Hono {
   });
 
   // Get unmatched tracks
-  app.get('/unmatched', (c) => {
+  app.get('/unmatched', async (c) => {
     const syncType = c.req.query('sync_type');
     const status = c.req.query('status') || 'pending';
     const limit = parseInt(c.req.query('limit') || '100');
     const offset = parseInt(c.req.query('offset') || '0');
 
-    const tracks = storage.getUnmatchedTracks(syncType, status, limit, offset);
-    const total = storage.getUnmatchedCount(syncType, status);
+    const tracks = await storage.getUnmatchedTracks(syncType, status, limit, offset);
+    const total = await storage.getUnmatchedCount(syncType, status);
 
     return c.json({ tracks, total, limit, offset });
   });
@@ -136,7 +136,7 @@ export function createApiRoutes(storage: Storage): Hono {
     }
 
     // Add to Qobuz favorites
-    const creds = storage.getCredentials('qobuz') as { user_auth_token: string } | null;
+    const creds = await storage.getCredentials('qobuz') as { user_auth_token: string } | null;
     if (creds) {
       const client = new QobuzClient(creds.user_auth_token);
       if (syncType === 'albums') {
@@ -146,31 +146,31 @@ export function createApiRoutes(storage: Storage): Hono {
       }
     }
 
-    storage.markTrackSynced(spotifyId, qobuzId, syncType);
-    storage.resolveUnmatchedTrack(spotifyId, syncType, qobuzId);
+    await storage.markTrackSynced(spotifyId, qobuzId, syncType);
+    await storage.resolveUnmatchedTrack(spotifyId, syncType, qobuzId);
 
     return c.json({ success: true });
   });
 
   // Dismiss unmatched track
-  app.post('/unmatched/:spotifyId/dismiss', (c) => {
+  app.post('/unmatched/:spotifyId/dismiss', async (c) => {
     const spotifyId = c.req.param('spotifyId');
     const syncType = c.req.query('sync_type') || 'favorites';
 
-    storage.dismissUnmatchedTrack(spotifyId, syncType);
+    await storage.dismissUnmatchedTrack(spotifyId, syncType);
     return c.json({ success: true });
   });
 
   // Get Spotify playlists
   app.get('/spotify/playlists', async (c) => {
-    const creds = storage.getCredentials('spotify') as SpotifyCredentials | null;
+    const creds = await storage.getCredentials('spotify') as SpotifyCredentials | null;
     if (!creds) {
       return c.json({ error: 'Spotify not connected' }, 401);
     }
 
     try {
-      const client = new SpotifyClient(creds, (newCreds) => {
-        storage.saveCredentials('spotify', newCreds as unknown as Record<string, unknown>);
+      const client = new SpotifyClient(creds, async (newCreds) => {
+        await storage.saveCredentials('spotify', newCreds as unknown as Record<string, unknown>);
       });
 
       const playlists = await client.listPlaylists();
@@ -182,9 +182,9 @@ export function createApiRoutes(storage: Storage): Hono {
   });
 
   // Get migrations/history
-  app.get('/migrations', (c) => {
+  app.get('/migrations', async (c) => {
     const limit = parseInt(c.req.query('limit') || '20');
-    const migrations = storage.getMigrations(limit);
+    const migrations = await storage.getMigrations(limit);
     return c.json({ migrations });
   });
 

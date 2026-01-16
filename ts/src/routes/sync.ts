@@ -42,8 +42,8 @@ export function createSyncRoutes(storage: Storage): Hono {
 
     // Create task
     const taskId = randomBytes(8).toString('hex');
-    const migrationId = storage.createMigration(syncType, dryRun);
-    storage.createTask(taskId, migrationId);
+    const migrationId = await storage.createMigration(syncType, dryRun);
+    await storage.createTask(taskId, migrationId);
 
     // Initialize task state
     activeTasks.set(taskId, {
@@ -73,13 +73,13 @@ export function createSyncRoutes(storage: Storage): Hono {
   });
 
   // Get sync status
-  app.get('/status/:taskId', (c) => {
+  app.get('/status/:taskId', async (c) => {
     const taskId = c.req.param('taskId');
     const task = activeTasks.get(taskId);
 
     if (!task) {
       // Check database
-      const dbTask = storage.getTask(taskId);
+      const dbTask = await storage.getTask(taskId);
       if (dbTask) {
         return c.json({
           task_id: taskId,
@@ -205,24 +205,24 @@ async function runSync(
   if (!task) return;
 
   // Get already synced tracks
-  const alreadySynced = storage.getSyncedTrackIds(syncType);
+  const alreadySynced = await storage.getSyncedTrackIds(syncType);
 
   // Create sync service with progress callback
-  const syncService = new AsyncSyncService(spotifyClient, qobuzClient, (progress) => {
+  const syncService = new AsyncSyncService(spotifyClient, qobuzClient, async (progress) => {
     task.progress = progress;
-    storage.updateTask(taskId, 'running', progress as unknown as Record<string, unknown>);
+    await storage.updateTask(taskId, 'running', progress as unknown as Record<string, unknown>);
   });
 
   task.service = syncService;
   task.status = 'running';
-  storage.updateTask(taskId, 'running');
+  await storage.updateTask(taskId, 'running');
 
   try {
     let report: SyncReport | AlbumSyncReport;
 
     // Track synced callback
-    const onItemSynced = (spotifyId: string, qobuzId: string) => {
-      storage.markTrackSynced(spotifyId, qobuzId, syncType);
+    const onItemSynced = async (spotifyId: string, qobuzId: string) => {
+      await storage.markTrackSynced(spotifyId, qobuzId, syncType);
     };
 
     if (syncType === 'favorites') {
@@ -230,7 +230,7 @@ async function runSync(
 
       // Save unmatched tracks
       for (const track of report.missing_tracks) {
-        storage.saveUnmatchedTrack(
+        await storage.saveUnmatchedTrack(
           track.spotify_id,
           track.title,
           track.artist,
@@ -244,7 +244,7 @@ async function runSync(
 
       // Save unmatched albums
       for (const album of (report as AlbumSyncReport).missing_albums) {
-        storage.saveUnmatchedTrack(
+        await storage.saveUnmatchedTrack(
           album.spotify_id,
           album.title,
           album.artist,
@@ -258,7 +258,7 @@ async function runSync(
 
       // Save unmatched tracks
       for (const track of report.missing_tracks) {
-        storage.saveUnmatchedTrack(
+        await storage.saveUnmatchedTrack(
           track.spotify_id,
           track.title,
           track.artist,
@@ -273,7 +273,7 @@ async function runSync(
     task.report = report;
 
     // Update migration record
-    storage.updateMigration(migrationId, {
+    await storage.updateMigration(migrationId, {
       completed_at: new Date().toISOString(),
       status: 'completed',
       tracks_matched: 'tracks_matched' in report ? report.tracks_matched : (report as AlbumSyncReport).albums_matched,
@@ -283,34 +283,34 @@ async function runSync(
       report_json: JSON.stringify(report),
     });
 
-    storage.updateTask(taskId, 'completed', task.progress as unknown as Record<string, unknown>);
+    await storage.updateTask(taskId, 'completed', task.progress as unknown as Record<string, unknown>);
 
     logger.info(`Sync completed: ${taskId}`);
   } catch (error) {
     task.status = 'failed';
     task.error = String(error);
 
-    storage.updateMigration(migrationId, {
+    await storage.updateMigration(migrationId, {
       completed_at: new Date().toISOString(),
       status: 'failed',
       report_json: JSON.stringify({ error: String(error) }),
     });
 
-    storage.updateTask(taskId, 'failed');
+    await storage.updateTask(taskId, 'failed');
     logger.error(`Sync failed: ${error}`);
   }
 }
 
 async function getClients(storage: Storage): Promise<{ spotify: SpotifyClient; qobuz: QobuzClient } | null> {
-  const spotifyCreds = storage.getCredentials('spotify') as SpotifyCredentials | null;
-  const qobuzCreds = storage.getCredentials('qobuz') as { user_auth_token: string } | null;
+  const spotifyCreds = await storage.getCredentials('spotify') as SpotifyCredentials | null;
+  const qobuzCreds = await storage.getCredentials('qobuz') as { user_auth_token: string } | null;
 
   if (!spotifyCreds || !qobuzCreds) {
     return null;
   }
 
-  const spotifyClient = new SpotifyClient(spotifyCreds, (newCreds) => {
-    storage.saveCredentials('spotify', newCreds as unknown as Record<string, unknown>);
+  const spotifyClient = new SpotifyClient(spotifyCreds, async (newCreds) => {
+    await storage.saveCredentials('spotify', newCreds as unknown as Record<string, unknown>);
   });
 
   const qobuzClient = new QobuzClient(qobuzCreds.user_auth_token);

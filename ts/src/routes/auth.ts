@@ -66,7 +66,7 @@ export function createAuthRoutes(storage: Storage): Hono {
       await client.getStats();
 
       // Save credentials
-      storage.saveCredentials('spotify', credentials as unknown as Record<string, unknown>);
+      await storage.saveCredentials('spotify', credentials as unknown as Record<string, unknown>);
 
       logger.info('Spotify connected successfully');
       return c.redirect('/?spotify_connected=true');
@@ -141,7 +141,7 @@ export function createAuthRoutes(storage: Storage): Hono {
       await client.authenticate();
 
       // Save credentials
-      storage.saveCredentials('qobuz', { user_auth_token: token });
+      await storage.saveCredentials('qobuz', { user_auth_token: token });
 
       logger.info('Qobuz connected successfully');
       return c.redirect('/?qobuz_connected=true');
@@ -152,15 +152,15 @@ export function createAuthRoutes(storage: Storage): Hono {
   });
 
   // Disconnect Spotify
-  app.post('/spotify/disconnect', (c) => {
-    storage.deleteCredentials('spotify');
+  app.post('/spotify/disconnect', async (c) => {
+    await storage.deleteCredentials('spotify');
     logger.info('Spotify disconnected');
     return c.redirect('/');
   });
 
   // Disconnect Qobuz
-  app.post('/qobuz/disconnect', (c) => {
-    storage.deleteCredentials('qobuz');
+  app.post('/qobuz/disconnect', async (c) => {
+    await storage.deleteCredentials('qobuz');
     logger.info('Qobuz disconnected');
     return c.redirect('/');
   });

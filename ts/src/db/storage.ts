@@ -1,13 +1,15 @@
 /**
- * SQLite storage for migration history and credentials.
- * Equivalent to Python's src/storage.py
+ * PostgreSQL storage for migration history and credentials.
+ * Uses Neon serverless driver for Vercel deployment.
  */
 
-import Database from 'better-sqlite3';
-import { mkdirSync, existsSync, readFileSync, writeFileSync, chmodSync } from 'fs';
-import { dirname, join } from 'path';
+import { neon, neonConfig } from '@neondatabase/serverless';
 import { encrypt, decrypt, generateEncryptionKey } from '../lib/crypto';
 import { logger } from '../lib/logger';
+
+// Enable connection pooling for serverless
+neonConfig.poolConnections = true;
+neonConfig.useSecureWebSocket = true;
 
 export interface Migration {
   id: number;
@@ -15,7 +17,7 @@ export interface Migration {
   completed_at: string | null;
   status: string;
   migration_type: string;
-  dry_run: number;
+  dry_run: boolean;
   playlists_total: number;
   playlists_synced: number;
   tracks_matched: number;
@@ -50,64 +52,49 @@ export interface UnmatchedTrack {
   suggestions?: Array<Record<string, unknown>>;
 }
 
+type SQL = ReturnType<typeof neon>;
+
 export class Storage {
-  private db: Database.Database;
+  private sql: SQL;
   private encryptionKey: string;
 
-  constructor(dbPath: string = 'data/migrations.db') {
-    this.ensureDirectory(dbPath);
-    this.encryptionKey = this.getOrCreateKey(dbPath);
-    this.db = new Database(dbPath);
-    this.db.pragma('journal_mode = WAL');
+  constructor(databaseUrl?: string) {
+    const url = databaseUrl || process.env.DATABASE_URL;
+    if (!url) {
+      throw new Error('DATABASE_URL environment variable is required');
+    }
+    this.sql = neon(url);
+    this.encryptionKey = this.getEncryptionKey();
   }
 
-  private ensureDirectory(dbPath: string): void {
-    const dir = dirname(dbPath);
-    if (!existsSync(dir)) {
-      mkdirSync(dir, { recursive: true });
-    }
-  }
-
-  private getOrCreateKey(dbPath: string): string {
-    // Check environment variable first (for cloud deployments)
-    if (process.env.ENCRYPTION_KEY) {
-      return process.env.ENCRYPTION_KEY;
-    }
-
-    // Fall back to file-based key (for local development)
-    const keyPath = join(dirname(dbPath), '.encryption_key');
-    if (existsSync(keyPath)) {
-      return readFileSync(keyPath, 'utf-8').trim();
-    }
-
-    const key = generateEncryptionKey();
-    writeFileSync(keyPath, key);
-    try {
-      chmodSync(keyPath, 0o600);
-    } catch {
-      // chmod may fail on some systems
+  private getEncryptionKey(): string {
+    const key = process.env.ENCRYPTION_KEY;
+    if (!key) {
+      // In development, generate a key and warn
+      logger.warn('ENCRYPTION_KEY not set, generating temporary key (not for production!)');
+      return generateEncryptionKey();
     }
     return key;
   }
 
-  initDb(): void {
-    this.db.exec(`
+  async initDb(): Promise<void> {
+    await this.sql`
       CREATE TABLE IF NOT EXISTS credentials (
-        id INTEGER PRIMARY KEY,
+        id SERIAL PRIMARY KEY,
         service TEXT UNIQUE NOT NULL,
         data TEXT NOT NULL,
-        updated_at TEXT NOT NULL
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )
-    `);
+    `;
 
-    this.db.exec(`
+    await this.sql`
       CREATE TABLE IF NOT EXISTS migrations (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        started_at TEXT NOT NULL,
-        completed_at TEXT,
+        id SERIAL PRIMARY KEY,
+        started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        completed_at TIMESTAMPTZ,
         status TEXT NOT NULL,
         migration_type TEXT NOT NULL,
-        dry_run INTEGER DEFAULT 0,
+        dry_run BOOLEAN DEFAULT FALSE,
         playlists_total INTEGER DEFAULT 0,
         playlists_synced INTEGER DEFAULT 0,
         tracks_matched INTEGER DEFAULT 0,
@@ -116,48 +103,40 @@ export class Storage {
         fuzzy_matches INTEGER DEFAULT 0,
         report_json TEXT
       )
-    `);
+    `;
 
-    // Add dry_run column if it doesn't exist (migration for existing DBs)
-    try {
-      this.db.exec('ALTER TABLE migrations ADD COLUMN dry_run INTEGER DEFAULT 0');
-    } catch {
-      // Column already exists
-    }
-
-    this.db.exec(`
+    await this.sql`
       CREATE TABLE IF NOT EXISTS sync_tasks (
         id TEXT PRIMARY KEY,
-        migration_id INTEGER,
+        migration_id INTEGER REFERENCES migrations(id),
         status TEXT NOT NULL,
         progress_json TEXT,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL,
-        FOREIGN KEY (migration_id) REFERENCES migrations(id)
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )
-    `);
+    `;
 
-    this.db.exec(`
+    await this.sql`
       CREATE TABLE IF NOT EXISTS synced_tracks (
         spotify_id TEXT PRIMARY KEY,
         qobuz_id TEXT,
         sync_type TEXT NOT NULL,
-        synced_at TEXT NOT NULL
+        synced_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )
-    `);
+    `;
 
-    this.db.exec(`
+    await this.sql`
       CREATE TABLE IF NOT EXISTS sync_progress (
         sync_type TEXT PRIMARY KEY,
         last_offset INTEGER DEFAULT 0,
         total_tracks INTEGER DEFAULT 0,
-        updated_at TEXT NOT NULL
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )
-    `);
+    `;
 
-    this.db.exec(`
+    await this.sql`
       CREATE TABLE IF NOT EXISTS unmatched_tracks (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id SERIAL PRIMARY KEY,
         spotify_id TEXT NOT NULL,
         title TEXT NOT NULL,
         artist TEXT NOT NULL,
@@ -166,57 +145,60 @@ export class Storage {
         suggestions_json TEXT,
         status TEXT DEFAULT 'pending',
         resolved_qobuz_id TEXT,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         UNIQUE(spotify_id, sync_type)
       )
-    `);
+    `;
+
+    // Create indexes for performance
+    await this.sql`CREATE INDEX IF NOT EXISTS idx_synced_tracks_sync_type ON synced_tracks(sync_type)`;
+    await this.sql`CREATE INDEX IF NOT EXISTS idx_unmatched_status ON unmatched_tracks(status)`;
+    await this.sql`CREATE INDEX IF NOT EXISTS idx_migrations_started ON migrations(started_at DESC)`;
 
     logger.info('Database initialized');
   }
 
   // --- Credentials ---
 
-  saveCredentials(service: string, credentials: Record<string, unknown>): void {
+  async saveCredentials(service: string, credentials: Record<string, unknown>): Promise<void> {
     const encrypted = encrypt(JSON.stringify(credentials), this.encryptionKey);
-    const stmt = this.db.prepare(`
-      INSERT OR REPLACE INTO credentials (service, data, updated_at)
-      VALUES (?, ?, ?)
-    `);
-    stmt.run(service, encrypted, new Date().toISOString());
+    await this.sql`
+      INSERT INTO credentials (service, data, updated_at)
+      VALUES (${service}, ${encrypted}, NOW())
+      ON CONFLICT (service) DO UPDATE SET data = ${encrypted}, updated_at = NOW()
+    `;
   }
 
-  getCredentials(service: string): Record<string, unknown> | null {
-    const stmt = this.db.prepare('SELECT data FROM credentials WHERE service = ?');
-    const row = stmt.get(service) as { data: string } | undefined;
-    if (row) {
-      return JSON.parse(decrypt(row.data, this.encryptionKey));
+  async getCredentials(service: string): Promise<Record<string, unknown> | null> {
+    const rows = await this.sql`SELECT data FROM credentials WHERE service = ${service}`;
+    if (rows.length > 0) {
+      return JSON.parse(decrypt(rows[0].data, this.encryptionKey));
     }
     return null;
   }
 
-  hasCredentials(service: string): boolean {
-    const stmt = this.db.prepare('SELECT 1 FROM credentials WHERE service = ?');
-    return stmt.get(service) !== undefined;
+  async hasCredentials(service: string): Promise<boolean> {
+    const rows = await this.sql`SELECT 1 FROM credentials WHERE service = ${service}`;
+    return rows.length > 0;
   }
 
-  deleteCredentials(service: string): void {
-    const stmt = this.db.prepare('DELETE FROM credentials WHERE service = ?');
-    stmt.run(service);
+  async deleteCredentials(service: string): Promise<void> {
+    await this.sql`DELETE FROM credentials WHERE service = ${service}`;
   }
 
   // --- Migrations ---
 
-  createMigration(migrationType: string, dryRun: boolean = false): number {
-    const stmt = this.db.prepare(`
-      INSERT INTO migrations (started_at, status, migration_type, dry_run)
-      VALUES (?, ?, ?, ?)
-    `);
-    const result = stmt.run(new Date().toISOString(), 'running', migrationType, dryRun ? 1 : 0);
-    return result.lastInsertRowid as number;
+  async createMigration(migrationType: string, dryRun: boolean = false): Promise<number> {
+    const rows = await this.sql`
+      INSERT INTO migrations (status, migration_type, dry_run)
+      VALUES ('running', ${migrationType}, ${dryRun})
+      RETURNING id
+    `;
+    return rows[0].id;
   }
 
-  updateMigration(migrationId: number, updates: Partial<Migration>): void {
+  async updateMigration(migrationId: number, updates: Partial<Migration>): Promise<void> {
     const allowedFields = new Set([
       'completed_at', 'status', 'playlists_total', 'playlists_synced',
       'tracks_matched', 'tracks_not_matched', 'isrc_matches',
@@ -226,50 +208,51 @@ export class Storage {
     const filtered = Object.entries(updates).filter(([k]) => allowedFields.has(k));
     if (filtered.length === 0) return;
 
-    const setClause = filtered.map(([k]) => `${k} = ?`).join(', ');
-    const values = [...filtered.map(([, v]) => v), migrationId];
+    // Build dynamic update query
+    const setClauses = filtered.map(([k, v]) => {
+      if (k === 'completed_at' && v === null) {
+        return `${k} = NULL`;
+      }
+      return `${k} = '${v}'`;
+    }).join(', ');
 
-    const stmt = this.db.prepare(`UPDATE migrations SET ${setClause} WHERE id = ?`);
-    stmt.run(...values);
+    await this.sql.unsafe(`UPDATE migrations SET ${setClauses} WHERE id = ${migrationId}`);
   }
 
-  getMigration(migrationId: number): Migration | null {
-    const stmt = this.db.prepare('SELECT * FROM migrations WHERE id = ?');
-    return stmt.get(migrationId) as Migration | null;
+  async getMigration(migrationId: number): Promise<Migration | null> {
+    const rows = await this.sql`SELECT * FROM migrations WHERE id = ${migrationId}`;
+    return rows.length > 0 ? rows[0] as Migration : null;
   }
 
-  getMigrations(limit: number = 20): Migration[] {
-    const stmt = this.db.prepare(`
-      SELECT * FROM migrations ORDER BY started_at DESC LIMIT ?
-    `);
-    return stmt.all(limit) as Migration[];
+  async getMigrations(limit: number = 20): Promise<Migration[]> {
+    const rows = await this.sql`
+      SELECT * FROM migrations ORDER BY started_at DESC LIMIT ${limit}
+    `;
+    return rows as Migration[];
   }
 
   // --- Tasks ---
 
-  createTask(taskId: string, migrationId: number): string {
-    const now = new Date().toISOString();
-    const stmt = this.db.prepare(`
-      INSERT INTO sync_tasks (id, migration_id, status, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?)
-    `);
-    stmt.run(taskId, migrationId, 'pending', now, now);
+  async createTask(taskId: string, migrationId: number): Promise<string> {
+    await this.sql`
+      INSERT INTO sync_tasks (id, migration_id, status)
+      VALUES (${taskId}, ${migrationId}, 'pending')
+    `;
     return taskId;
   }
 
-  updateTask(taskId: string, status: string, progress?: Record<string, unknown>): void {
+  async updateTask(taskId: string, status: string, progress?: Record<string, unknown>): Promise<void> {
     const progressJson = progress ? JSON.stringify(progress) : null;
-    const stmt = this.db.prepare(`
-      UPDATE sync_tasks SET status = ?, progress_json = ?, updated_at = ?
-      WHERE id = ?
-    `);
-    stmt.run(status, progressJson, new Date().toISOString(), taskId);
+    await this.sql`
+      UPDATE sync_tasks SET status = ${status}, progress_json = ${progressJson}, updated_at = NOW()
+      WHERE id = ${taskId}
+    `;
   }
 
-  getTask(taskId: string): SyncTask | null {
-    const stmt = this.db.prepare('SELECT * FROM sync_tasks WHERE id = ?');
-    const row = stmt.get(taskId) as SyncTask | undefined;
-    if (row) {
+  async getTask(taskId: string): Promise<SyncTask | null> {
+    const rows = await this.sql`SELECT * FROM sync_tasks WHERE id = ${taskId}`;
+    if (rows.length > 0) {
+      const row = rows[0] as SyncTask;
       if (row.progress_json) {
         row.progress = JSON.parse(row.progress_json);
       }
@@ -280,173 +263,153 @@ export class Storage {
 
   // --- Synced Track Tracking ---
 
-  isTrackSynced(spotifyId: string, syncType: string): boolean {
-    const stmt = this.db.prepare(
-      'SELECT 1 FROM synced_tracks WHERE spotify_id = ? AND sync_type = ?'
-    );
-    return stmt.get(spotifyId, syncType) !== undefined;
+  async isTrackSynced(spotifyId: string, syncType: string): Promise<boolean> {
+    const rows = await this.sql`
+      SELECT 1 FROM synced_tracks WHERE spotify_id = ${spotifyId} AND sync_type = ${syncType}
+    `;
+    return rows.length > 0;
   }
 
-  markTrackSynced(spotifyId: string, qobuzId: string, syncType: string): void {
-    const stmt = this.db.prepare(`
-      INSERT OR REPLACE INTO synced_tracks (spotify_id, qobuz_id, sync_type, synced_at)
-      VALUES (?, ?, ?, ?)
-    `);
-    stmt.run(spotifyId, qobuzId, syncType, new Date().toISOString());
+  async markTrackSynced(spotifyId: string, qobuzId: string, syncType: string): Promise<void> {
+    await this.sql`
+      INSERT INTO synced_tracks (spotify_id, qobuz_id, sync_type)
+      VALUES (${spotifyId}, ${qobuzId}, ${syncType})
+      ON CONFLICT (spotify_id) DO UPDATE SET qobuz_id = ${qobuzId}, synced_at = NOW()
+    `;
   }
 
-  getSyncedTrackIds(syncType: string): Set<string> {
-    const stmt = this.db.prepare('SELECT spotify_id FROM synced_tracks WHERE sync_type = ?');
-    const rows = stmt.all(syncType) as Array<{ spotify_id: string }>;
-    return new Set(rows.map(r => r.spotify_id));
+  async getSyncedTrackIds(syncType: string): Promise<Set<string>> {
+    const rows = await this.sql`SELECT spotify_id FROM synced_tracks WHERE sync_type = ${syncType}`;
+    return new Set(rows.map((r: { spotify_id: string }) => r.spotify_id));
   }
 
-  getSyncedCount(syncType: string): number {
-    const stmt = this.db.prepare('SELECT COUNT(*) as count FROM synced_tracks WHERE sync_type = ?');
-    const row = stmt.get(syncType) as { count: number };
-    return row.count;
+  async getSyncedCount(syncType: string): Promise<number> {
+    const rows = await this.sql`SELECT COUNT(*) as count FROM synced_tracks WHERE sync_type = ${syncType}`;
+    return parseInt(rows[0].count);
   }
 
-  clearSyncedTracks(syncType: string): void {
-    const stmt = this.db.prepare('DELETE FROM synced_tracks WHERE sync_type = ?');
-    stmt.run(syncType);
+  async clearSyncedTracks(syncType: string): Promise<void> {
+    await this.sql`DELETE FROM synced_tracks WHERE sync_type = ${syncType}`;
   }
 
   // --- Sync Progress ---
 
-  saveSyncProgress(syncType: string, lastOffset: number, totalTracks: number): void {
-    const stmt = this.db.prepare(`
-      INSERT OR REPLACE INTO sync_progress (sync_type, last_offset, total_tracks, updated_at)
-      VALUES (?, ?, ?, ?)
-    `);
-    stmt.run(syncType, lastOffset, totalTracks, new Date().toISOString());
+  async saveSyncProgress(syncType: string, lastOffset: number, totalTracks: number): Promise<void> {
+    await this.sql`
+      INSERT INTO sync_progress (sync_type, last_offset, total_tracks, updated_at)
+      VALUES (${syncType}, ${lastOffset}, ${totalTracks}, NOW())
+      ON CONFLICT (sync_type) DO UPDATE SET last_offset = ${lastOffset}, total_tracks = ${totalTracks}, updated_at = NOW()
+    `;
   }
 
-  getSyncProgress(syncType: string): { last_offset: number; total_tracks: number } | null {
-    const stmt = this.db.prepare('SELECT * FROM sync_progress WHERE sync_type = ?');
-    return stmt.get(syncType) as { last_offset: number; total_tracks: number } | null;
+  async getSyncProgress(syncType: string): Promise<{ last_offset: number; total_tracks: number } | null> {
+    const rows = await this.sql`SELECT last_offset, total_tracks FROM sync_progress WHERE sync_type = ${syncType}`;
+    return rows.length > 0 ? { last_offset: rows[0].last_offset, total_tracks: rows[0].total_tracks } : null;
   }
 
-  clearSyncProgress(syncType: string): void {
-    const stmt = this.db.prepare('DELETE FROM sync_progress WHERE sync_type = ?');
-    stmt.run(syncType);
+  async clearSyncProgress(syncType: string): Promise<void> {
+    await this.sql`DELETE FROM sync_progress WHERE sync_type = ${syncType}`;
   }
 
-  cleanupStaleTasks(): void {
-    const now = new Date().toISOString();
-
-    this.db.exec(`
-      UPDATE sync_tasks SET status = 'interrupted', updated_at = '${now}'
+  async cleanupStaleTasks(): Promise<void> {
+    await this.sql`
+      UPDATE sync_tasks SET status = 'interrupted', updated_at = NOW()
       WHERE status IN ('running', 'pending', 'starting')
-    `);
+    `;
 
-    this.db.exec(`
-      UPDATE migrations SET status = 'interrupted', completed_at = '${now}'
+    await this.sql`
+      UPDATE migrations SET status = 'interrupted', completed_at = NOW()
       WHERE status = 'running'
-    `);
+    `;
   }
 
   // --- Unmatched Tracks ---
 
-  saveUnmatchedTrack(
+  async saveUnmatchedTrack(
     spotifyId: string,
     title: string,
     artist: string,
     album: string,
     syncType: string,
     suggestions: Array<Record<string, unknown>>
-  ): void {
-    const now = new Date().toISOString();
+  ): Promise<void> {
     const suggestionsJson = suggestions.length > 0 ? JSON.stringify(suggestions) : null;
 
-    const stmt = this.db.prepare(`
-      INSERT OR REPLACE INTO unmatched_tracks
-      (spotify_id, title, artist, album, sync_type, suggestions_json, status, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)
-    `);
-    stmt.run(spotifyId, title, artist, album, syncType, suggestionsJson, now, now);
+    await this.sql`
+      INSERT INTO unmatched_tracks (spotify_id, title, artist, album, sync_type, suggestions_json, status)
+      VALUES (${spotifyId}, ${title}, ${artist}, ${album}, ${syncType}, ${suggestionsJson}, 'pending')
+      ON CONFLICT (spotify_id, sync_type) DO UPDATE SET
+        title = ${title}, artist = ${artist}, album = ${album},
+        suggestions_json = ${suggestionsJson}, updated_at = NOW()
+    `;
   }
 
-  getUnmatchedTracks(
+  async getUnmatchedTracks(
     syncType?: string,
     status: string = 'pending',
     limit: number = 100,
     offset: number = 0
-  ): UnmatchedTrack[] {
-    let query = 'SELECT * FROM unmatched_tracks WHERE 1=1';
-    const params: unknown[] = [];
-
+  ): Promise<UnmatchedTrack[]> {
+    let rows;
     if (syncType) {
-      query += ' AND sync_type = ?';
-      params.push(syncType);
+      rows = await this.sql`
+        SELECT * FROM unmatched_tracks
+        WHERE sync_type = ${syncType} AND status = ${status}
+        ORDER BY created_at DESC LIMIT ${limit} OFFSET ${offset}
+      `;
+    } else {
+      rows = await this.sql`
+        SELECT * FROM unmatched_tracks
+        WHERE status = ${status}
+        ORDER BY created_at DESC LIMIT ${limit} OFFSET ${offset}
+      `;
     }
 
-    if (status) {
-      query += ' AND status = ?';
-      params.push(status);
-    }
-
-    query += ' ORDER BY created_at DESC LIMIT ? OFFSET ?';
-    params.push(limit, offset);
-
-    const stmt = this.db.prepare(query);
-    const rows = stmt.all(...params) as UnmatchedTrack[];
-
-    return rows.map(row => {
-      if (row.suggestions_json) {
-        row.suggestions = JSON.parse(row.suggestions_json);
+    return rows.map((row: Record<string, unknown>) => {
+      const track = row as unknown as UnmatchedTrack;
+      if (track.suggestions_json) {
+        track.suggestions = JSON.parse(track.suggestions_json);
       } else {
-        row.suggestions = [];
+        track.suggestions = [];
       }
-      return row;
+      return track;
     });
   }
 
-  getUnmatchedCount(syncType?: string, status: string = 'pending'): number {
-    let query = 'SELECT COUNT(*) as count FROM unmatched_tracks WHERE 1=1';
-    const params: unknown[] = [];
-
+  async getUnmatchedCount(syncType?: string, status: string = 'pending'): Promise<number> {
+    let rows;
     if (syncType) {
-      query += ' AND sync_type = ?';
-      params.push(syncType);
-    }
-
-    if (status) {
-      query += ' AND status = ?';
-      params.push(status);
-    }
-
-    const stmt = this.db.prepare(query);
-    const row = stmt.get(...params) as { count: number };
-    return row.count;
-  }
-
-  resolveUnmatchedTrack(spotifyId: string, syncType: string, qobuzId: string, status: string = 'resolved'): void {
-    const stmt = this.db.prepare(`
-      UPDATE unmatched_tracks SET status = ?, resolved_qobuz_id = ?, updated_at = ?
-      WHERE spotify_id = ? AND sync_type = ?
-    `);
-    stmt.run(status, qobuzId, new Date().toISOString(), spotifyId, syncType);
-  }
-
-  dismissUnmatchedTrack(spotifyId: string, syncType: string): void {
-    const stmt = this.db.prepare(`
-      UPDATE unmatched_tracks SET status = 'dismissed', updated_at = ?
-      WHERE spotify_id = ? AND sync_type = ?
-    `);
-    stmt.run(new Date().toISOString(), spotifyId, syncType);
-  }
-
-  clearUnmatchedTracks(syncType?: string): void {
-    if (syncType) {
-      const stmt = this.db.prepare('DELETE FROM unmatched_tracks WHERE sync_type = ?');
-      stmt.run(syncType);
+      rows = await this.sql`
+        SELECT COUNT(*) as count FROM unmatched_tracks
+        WHERE sync_type = ${syncType} AND status = ${status}
+      `;
     } else {
-      this.db.exec('DELETE FROM unmatched_tracks');
+      rows = await this.sql`
+        SELECT COUNT(*) as count FROM unmatched_tracks WHERE status = ${status}
+      `;
     }
+    return parseInt(rows[0].count);
   }
 
-  close(): void {
-    this.db.close();
+  async resolveUnmatchedTrack(spotifyId: string, syncType: string, qobuzId: string, status: string = 'resolved'): Promise<void> {
+    await this.sql`
+      UPDATE unmatched_tracks SET status = ${status}, resolved_qobuz_id = ${qobuzId}, updated_at = NOW()
+      WHERE spotify_id = ${spotifyId} AND sync_type = ${syncType}
+    `;
+  }
+
+  async dismissUnmatchedTrack(spotifyId: string, syncType: string): Promise<void> {
+    await this.sql`
+      UPDATE unmatched_tracks SET status = 'dismissed', updated_at = NOW()
+      WHERE spotify_id = ${spotifyId} AND sync_type = ${syncType}
+    `;
+  }
+
+  async clearUnmatchedTracks(syncType?: string): Promise<void> {
+    if (syncType) {
+      await this.sql`DELETE FROM unmatched_tracks WHERE sync_type = ${syncType}`;
+    } else {
+      await this.sql`DELETE FROM unmatched_tracks`;
+    }
   }
 }

@@ -17,8 +17,12 @@ import ejs from 'ejs';
 
 // Initialize storage
 const storage = new Storage();
-storage.initDb();
-storage.cleanupStaleTasks();
+
+// Initialize database (async, runs at startup)
+(async () => {
+  await storage.initDb();
+  await storage.cleanupStaleTasks();
+})();
 
 // Create Hono app
 const app = new Hono();
@@ -35,9 +39,9 @@ app.route('/sync', createSyncRoutes(storage));
 app.route('/api', createApiRoutes(storage));
 
 // Helper to check auth status
-function getAuthStatus(storage: Storage): { spotify: boolean; qobuz: boolean; both_connected: boolean } {
-  const spotify = storage.hasCredentials('spotify');
-  const qobuz = storage.hasCredentials('qobuz');
+async function getAuthStatus(storage: Storage): Promise<{ spotify: boolean; qobuz: boolean; both_connected: boolean }> {
+  const spotify = await storage.hasCredentials('spotify');
+  const qobuz = await storage.hasCredentials('qobuz');
   return { spotify, qobuz, both_connected: spotify && qobuz };
 }
 
@@ -53,8 +57,8 @@ function renderTemplate(name: string, data: Record<string, unknown>): string {
 
 // Page routes
 app.get('/', async (c) => {
-  const authStatus = getAuthStatus(storage);
-  const migrations = storage.getMigrations(5);
+  const authStatus = await getAuthStatus(storage);
+  const migrations = await storage.getMigrations(5);
 
   const html = renderTemplate('index', {
     auth_status: authStatus,
@@ -65,7 +69,7 @@ app.get('/', async (c) => {
 });
 
 app.get('/playlists', async (c) => {
-  const authStatus = getAuthStatus(storage);
+  const authStatus = await getAuthStatus(storage);
   if (!authStatus.spotify) {
     return c.redirect('/');
   }
@@ -78,7 +82,7 @@ app.get('/playlists', async (c) => {
 });
 
 app.get('/compare', async (c) => {
-  const authStatus = getAuthStatus(storage);
+  const authStatus = await getAuthStatus(storage);
   if (!authStatus.both_connected) {
     return c.redirect('/');
   }
@@ -90,9 +94,9 @@ app.get('/compare', async (c) => {
   return c.html(html);
 });
 
-app.get('/history', (c) => {
-  const authStatus = getAuthStatus(storage);
-  const migrations = storage.getMigrations(50);
+app.get('/history', async (c) => {
+  const authStatus = await getAuthStatus(storage);
+  const migrations = await storage.getMigrations(50);
 
   const html = renderTemplate('history', {
     auth_status: authStatus,
@@ -102,8 +106,8 @@ app.get('/history', (c) => {
   return c.html(html);
 });
 
-app.get('/review', (c) => {
-  const authStatus = getAuthStatus(storage);
+app.get('/review', async (c) => {
+  const authStatus = await getAuthStatus(storage);
 
   const html = renderTemplate('review', {
     auth_status: authStatus,
