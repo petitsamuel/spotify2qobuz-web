@@ -47,7 +47,7 @@ class TrackMatcherV2:
     TITLE_THRESHOLD = 75
     ARTIST_THRESHOLD = 70
     DURATION_TOLERANCE_MS = 10000  # 10 seconds (more lenient for remasters)
-    MIN_COMBINED_SCORE = 70
+    MIN_COMBINED_SCORE = 78  # Raised from 70 to reduce false positives
 
     # Patterns for normalization
     FEAT_PATTERN = re.compile(
@@ -174,9 +174,13 @@ class TrackMatcherV2:
         return None, suggestions
 
     def _match_by_isrc(self, spotify_track: Dict) -> Optional[MatchResult]:
-        """Match track using ISRC code."""
+        """Match track using ISRC code with title/artist hints for fallback."""
         isrc = spotify_track['isrc']
-        qobuz_track = self.qobuz_client.search_by_isrc(isrc)
+        qobuz_track = self.qobuz_client.search_by_isrc(
+            isrc,
+            title_hint=spotify_track.get('title'),
+            artist_hint=spotify_track.get('artist')
+        )
 
         if qobuz_track:
             logger.info(
@@ -299,25 +303,33 @@ class TrackMatcherV2:
                         score=score
                     )
 
-        # Strategy 4: Title only search (for cases where artist name differs significantly)
+        # Strategy 4: Title search with relaxed artist matching
+        # (for cases where artist name differs significantly but is still related)
         candidates = self._search_candidates(title, "")
         for candidate in candidates:
             title_score = self._fuzzy_score(
                 self._normalize(title),
                 self._normalize(candidate['title'])
             )
+            # Must still have SOME artist similarity to prevent wrong covers
+            artist_score = self._fuzzy_score(
+                self._normalize(artist),
+                self._normalize(candidate['artist'])
+            )
             duration_diff = abs(spotify_track['duration'] - candidate['duration'])
-            # Require high title match and close duration
-            if title_score >= 90 and duration_diff <= 3000:
+
+            # Require: very high title match, reasonable artist match, close duration
+            # This prevents matching "Hallelujah" by Jeff Buckley to Leonard Cohen's version
+            if title_score >= 92 and artist_score >= 40 and duration_diff <= 3000:
                 logger.info(
-                    f"Title-only match (title_score={title_score:.1f}): "
+                    f"Title-focused match (title={title_score:.1f}, artist={artist_score:.1f}): "
                     f"{title} by {artist} "
                     f"-> {candidate['title']} by {candidate['artist']}"
                 )
                 return MatchResult(
                     qobuz_track=candidate,
                     match_type='fuzzy_title',
-                    score=title_score
+                    score=(title_score * 0.7) + (artist_score * 0.3)
                 )
 
         return None
@@ -417,15 +429,35 @@ class TrackMatcherV2:
         # Combined score - equal weighting (50/50) for better artist matching
         combined = (title_score * 0.5) + (artist_score * 0.5)
 
-        # Bonus for matching album
+        # Album matching: bonus for same album, penalty for compilations
         spotify_album = self._normalize(spotify_track.get('album', ''))
         candidate_album = self._normalize(candidate.get('album', ''))
         if spotify_album and candidate_album:
             album_score = fuzz.token_sort_ratio(spotify_album, candidate_album)
-            if album_score > 80:
-                combined = min(100, combined + 5)
+            if album_score > 85:
+                # Strong album match - significant bonus
+                combined = min(100, combined + 8)
+            elif album_score > 70:
+                # Moderate album match
+                combined = min(100, combined + 4)
+            elif self._is_compilation_album(candidate_album):
+                # Penalize compilation albums when Spotify source isn't a compilation
+                if not self._is_compilation_album(spotify_album):
+                    combined = max(0, combined - 5)
 
         return title_score, artist_score, combined
+
+    def _is_compilation_album(self, album_name: str) -> bool:
+        """Check if album name suggests it's a compilation/greatest hits."""
+        compilation_keywords = [
+            'greatest hits', 'best of', 'collection', 'anthology',
+            'essential', 'ultimate', 'complete', 'definitive',
+            'gold', 'platinum', 'legend', 'classics',
+            'hits', 'singles', 'compilation', 'various artists',
+            'soundtrack', 'ost', 'now that\'s what i call',
+        ]
+        album_lower = album_name.lower()
+        return any(kw in album_lower for kw in compilation_keywords)
 
     def _fuzzy_score(self, s1: str, s2: str) -> float:
         """
@@ -459,24 +491,76 @@ class TrackMatcherV2:
 
         return max(scores)
 
+    # Known duo/group artists that should NOT be split
+    KNOWN_DUOS = {
+        'simon & garfunkel', 'simon and garfunkel',
+        'hall & oates', 'hall and oates',
+        'crosby, stills & nash', 'crosby, stills, nash & young',
+        'earth, wind & fire', 'earth wind & fire',
+        'emerson, lake & palmer',
+        'peter, paul & mary', 'peter, paul and mary',
+        'tears for fears',
+        'the mamas & the papas', 'mamas and papas',
+        'florence + the machine', 'florence and the machine',
+        'belle & sebastian', 'belle and sebastian',
+        'tegan & sara', 'tegan and sara',
+        'penn & teller',
+        'brooks & dunn',
+        'blood, sweat & tears',
+        'tony! toni! toné!',
+        'three dog night',
+    }
+
     def _extract_featured_artists(self, s: str) -> Tuple[str, List[str]]:
         """
         Extract primary artist and featured artists from artist string.
         Returns (primary_artist, [featured_artists])
-        """
-        featured = []
 
-        # Match patterns like "Artist feat. Other" or "Artist (feat. Other)"
+        Carefully handles:
+        - Actual featured artists: "Drake feat. Rihanna"
+        - Duos/groups: "Simon & Garfunkel" (NOT split)
+        - Multiple features: "DJ Khaled feat. Drake, Lil Wayne & Rick Ross"
+        """
+        if not s:
+            return s, []
+
+        # Check if this is a known duo/group - don't split
+        s_lower = s.lower().strip()
+        for duo in self.KNOWN_DUOS:
+            if duo in s_lower or s_lower in duo:
+                return s, []
+
+        # Only split on explicit featuring keywords, not bare & or ,
+        # Pattern: "Primary Artist feat./ft./featuring/with Other Artists"
         feat_match = re.search(
-            r'(.+?)\s*(?:feat\.?|ft\.?|featuring|with|&|,)\s*(.+)',
+            r'^(.+?)\s+(?:feat\.?|ft\.?|featuring)\s+(.+)$',
             s, re.IGNORECASE
         )
 
         if feat_match:
             primary = feat_match.group(1).strip()
             others = feat_match.group(2)
-            # Split multiple featured artists
-            featured = [a.strip() for a in re.split(r'[,&]|feat\.?|ft\.?|and', others, flags=re.IGNORECASE) if a.strip()]
+            # Split featured artists on , & and (but keep "and" as word boundary)
+            featured = [
+                a.strip()
+                for a in re.split(r'\s*[,&]\s*|\s+and\s+', others, flags=re.IGNORECASE)
+                if a.strip()
+            ]
+            return primary, featured
+
+        # Check for parenthetical featuring: "Song (feat. Artist)"
+        paren_match = re.search(
+            r'^(.+?)\s*[\(\[](?:feat\.?|ft\.?|featuring)\s+([^\)\]]+)[\)\]]',
+            s, re.IGNORECASE
+        )
+        if paren_match:
+            primary = paren_match.group(1).strip()
+            others = paren_match.group(2)
+            featured = [
+                a.strip()
+                for a in re.split(r'\s*[,&]\s*|\s+and\s+', others, flags=re.IGNORECASE)
+                if a.strip()
+            ]
             return primary, featured
 
         return s, []

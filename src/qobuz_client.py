@@ -246,46 +246,69 @@ class QobuzClient:
         logger.error(f"Qobuz API request failed for {endpoint} after {max_retries + 1} attempts")
         raise Exception(f"Qobuz API request failed: {last_exception}")
     
-    def search_by_isrc(self, isrc: str) -> Optional[Dict]:
+    def search_by_isrc(self, isrc: str, title_hint: Optional[str] = None, artist_hint: Optional[str] = None) -> Optional[Dict]:
         """
-        Search for a track by ISRC code.
-        
+        Search for a track by ISRC code with fallback strategies.
+
         Args:
             isrc: ISRC code
-        
+            title_hint: Optional track title to help with fallback search
+            artist_hint: Optional artist name to help with fallback search
+
         Returns:
             Track dictionary with keys: id, title, artist, album, duration
             or None if not found
         """
         try:
+            # Strategy 1: Direct ISRC search with larger result set
             params = {
                 'query': isrc,
-                'limit': 5
+                'limit': 25  # Increased from 5 to catch more results
             }
-            
+
             data = self._make_request('track/search', params)
-            
-            if data.get('tracks', {}).get('total', 0) == 0:
-                logger.debug(f"No track found for ISRC: {isrc}")
-                return None
-            
-            # Find exact ISRC match
-            for item in data['tracks']['items']:
-                track_isrc = item.get('isrc')
-                if track_isrc and track_isrc.upper() == isrc.upper():
-                    track = {
-                        'id': item['id'],
-                        'title': item['title'],
-                        'artist': item['performer']['name'],
-                        'album': item['album']['title'],
-                        'duration': item['duration'] * 1000  # Convert to milliseconds
-                    }
-                    logger.debug(f"Found track by ISRC {isrc}: {track['title']} by {track['artist']}")
-                    return track
-            
+
+            if data.get('tracks', {}).get('items'):
+                # Find exact ISRC match in results
+                for item in data['tracks']['items']:
+                    track_isrc = item.get('isrc')
+                    if track_isrc and track_isrc.upper() == isrc.upper():
+                        track = {
+                            'id': item['id'],
+                            'title': item['title'],
+                            'artist': item['performer']['name'],
+                            'album': item['album']['title'],
+                            'duration': item['duration'] * 1000  # Convert to milliseconds
+                        }
+                        logger.debug(f"Found track by ISRC {isrc}: {track['title']} by {track['artist']}")
+                        return track
+
+            # Strategy 2: If title/artist hints provided, search by metadata
+            # and verify ISRC matches (catches cases where ISRC search doesn't return the track)
+            if title_hint and artist_hint:
+                metadata_params = {
+                    'query': f"{title_hint} {artist_hint}",
+                    'limit': 15
+                }
+                metadata_data = self._make_request('track/search', metadata_params)
+
+                if metadata_data.get('tracks', {}).get('items'):
+                    for item in metadata_data['tracks']['items']:
+                        track_isrc = item.get('isrc')
+                        if track_isrc and track_isrc.upper() == isrc.upper():
+                            track = {
+                                'id': item['id'],
+                                'title': item['title'],
+                                'artist': item['performer']['name'],
+                                'album': item['album']['title'],
+                                'duration': item['duration'] * 1000
+                            }
+                            logger.debug(f"Found track by ISRC {isrc} via metadata fallback: {track['title']}")
+                            return track
+
             logger.debug(f"No exact ISRC match found for: {isrc}")
             return None
-            
+
         except Exception as e:
             logger.error(f"Error searching by ISRC {isrc}: {e}")
             return None
