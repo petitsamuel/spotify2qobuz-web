@@ -88,6 +88,78 @@ def get_spotify_client_from_env() -> Optional[tuple]:
     return None
 
 
+async def get_valid_spotify_token(creds: Dict) -> str:
+    """Get a valid Spotify access token, refreshing if expired."""
+    import httpx
+    from datetime import datetime
+
+    expires_at = creds.get('expires_at', 0)
+    # Refresh if token expires in less than 5 minutes
+    if datetime.now().timestamp() < expires_at - 300:
+        return creds['access_token']
+
+    # Token expired or expiring soon, refresh it
+    refresh_token = creds.get('refresh_token')
+    if not refresh_token:
+        raise HTTPException(
+            status_code=401,
+            detail="Spotify session expired and no refresh token available. Please reconnect Spotify."
+        )
+
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            "https://accounts.spotify.com/api/token",
+            data={
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token,
+                "client_id": creds['client_id'],
+                "client_secret": creds['client_secret']
+            }
+        )
+
+        if response.status_code != 200:
+            raise HTTPException(
+                status_code=401,
+                detail="Failed to refresh Spotify token. Please reconnect Spotify."
+            )
+
+        token_data = response.json()
+
+    # Update stored credentials with new token
+    new_creds = {
+        **creds,
+        "access_token": token_data['access_token'],
+        "expires_at": datetime.now().timestamp() + token_data.get('expires_in', 3600)
+    }
+    # If Spotify returned a new refresh token, use it
+    if 'refresh_token' in token_data:
+        new_creds['refresh_token'] = token_data['refresh_token']
+
+    await storage.save_credentials("spotify", new_creds)
+
+    return token_data['access_token']
+
+
+async def get_authenticated_spotify_client() -> SpotifyClient:
+    """Get a SpotifyClient with a valid, refreshed access token."""
+    import spotipy
+
+    creds = await storage.get_credentials("spotify")
+    if not creds:
+        raise HTTPException(status_code=401, detail="Spotify not connected")
+
+    access_token = await get_valid_spotify_token(creds)
+
+    client = SpotifyClient(
+        client_id=creds['client_id'],
+        client_secret=creds['client_secret'],
+        redirect_uri=creds['redirect_uri']
+    )
+    client.sp = spotipy.Spotify(auth=access_token)
+
+    return client
+
+
 # Routes
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request, code: str = None, state: str = None, error: str = None):
@@ -273,16 +345,8 @@ async def list_playlists(request: Request):
     if not auth_status["spotify"]:
         return RedirectResponse("/")
 
-    creds = await storage.get_credentials("spotify")
     try:
-        client = SpotifyClient(
-            client_id=creds['client_id'],
-            client_secret=creds['client_secret'],
-            redirect_uri=creds['redirect_uri']
-        )
-        # Use stored token
-        import spotipy
-        client.sp = spotipy.Spotify(auth=creds['access_token'])
+        client = await get_authenticated_spotify_client()
         playlists = client.list_playlists()
     except Exception as e:
         return templates.TemplateResponse("error.html", {
@@ -349,17 +413,10 @@ async def run_sync_task(
         await storage.update_task(task_id, "running")
 
         # Get credentials
-        spotify_creds = await storage.get_credentials("spotify")
         qobuz_creds = await storage.get_credentials("qobuz")
 
         # Create clients
-        spotify_client = SpotifyClient(
-            client_id=spotify_creds['client_id'],
-            client_secret=spotify_creds['client_secret'],
-            redirect_uri=spotify_creds['redirect_uri']
-        )
-        import spotipy
-        spotify_client.sp = spotipy.Spotify(auth=spotify_creds['access_token'])
+        spotify_client = await get_authenticated_spotify_client()
 
         qobuz_client = QobuzClient(qobuz_creds['user_auth_token'])
         qobuz_client.authenticate()
@@ -667,17 +724,10 @@ async def compare_favorites():
     if not auth_status["both_connected"]:
         raise HTTPException(status_code=400, detail="Both services must be connected")
 
-    spotify_creds = await storage.get_credentials("spotify")
     qobuz_creds = await storage.get_credentials("qobuz")
 
     # Get Spotify saved tracks
-    spotify_client = SpotifyClient(
-        client_id=spotify_creds['client_id'],
-        client_secret=spotify_creds['client_secret'],
-        redirect_uri=spotify_creds['redirect_uri']
-    )
-    import spotipy
-    spotify_client.sp = spotipy.Spotify(auth=spotify_creds['access_token'])
+    spotify_client = await get_authenticated_spotify_client()
 
     # Get Qobuz favorites
     qobuz_client = QobuzClient(qobuz_creds['user_auth_token'])
@@ -798,17 +848,10 @@ async def compare_albums():
     if not auth_status["both_connected"]:
         raise HTTPException(status_code=400, detail="Both services must be connected")
 
-    spotify_creds = await storage.get_credentials("spotify")
     qobuz_creds = await storage.get_credentials("qobuz")
 
     # Get Spotify saved albums
-    spotify_client = SpotifyClient(
-        client_id=spotify_creds['client_id'],
-        client_secret=spotify_creds['client_secret'],
-        redirect_uri=spotify_creds['redirect_uri']
-    )
-    import spotipy
-    spotify_client.sp = spotipy.Spotify(auth=spotify_creds['access_token'])
+    spotify_client = await get_authenticated_spotify_client()
 
     # Get Qobuz favorites
     qobuz_client = QobuzClient(qobuz_creds['user_auth_token'])
@@ -927,15 +970,8 @@ async def get_spotify_stats():
     if not auth_status["spotify"]:
         raise HTTPException(status_code=401, detail="Spotify not connected")
 
-    creds = await storage.get_credentials("spotify")
     try:
-        client = SpotifyClient(
-            client_id=creds['client_id'],
-            client_secret=creds['client_secret'],
-            redirect_uri=creds['redirect_uri']
-        )
-        import spotipy
-        client.sp = spotipy.Spotify(auth=creds['access_token'])
+        client = await get_authenticated_spotify_client()
 
         # Get playlist count
         playlists = client.sp.current_user_playlists(limit=1)
