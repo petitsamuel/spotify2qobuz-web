@@ -443,13 +443,13 @@ class QobuzClient:
     def add_favorite_track(self, track_id: int) -> bool:
         """
         Add a track to user's favorites.
-        
+
         Args:
             track_id: Qobuz track ID to favorite
-        
+
         Returns:
             True if successful, False otherwise
-        
+
         Raises:
             Exception: If API call fails
         """
@@ -458,20 +458,54 @@ class QobuzClient:
             params = {
                 "track_ids": str(track_id)
             }
-            
+
             response = self._session.post(url, params=params, timeout=10)
-            
+
             # Qobuz may return 400 if already favorited, which is fine
             if response.status_code == 400:
                 logger.debug(f"Track {track_id} is already favorited")
                 return True
-            
+
             response.raise_for_status()
             logger.debug(f"Added track {track_id} to favorites")
             return True
-            
+
         except requests.exceptions.RequestException as e:
             logger.error(f"Failed to add track {track_id} to favorites: {e}")
+            return False
+
+    def add_favorite_tracks_batch(self, track_ids: List[int]) -> bool:
+        """
+        Add multiple tracks to user's favorites in a single API call.
+
+        Args:
+            track_ids: List of Qobuz track IDs to favorite
+
+        Returns:
+            True if successful, False otherwise
+        """
+        if not track_ids:
+            return True
+
+        try:
+            url = f"{self.BASE_URL}/favorite/create"
+            params = {
+                "track_ids": ",".join(str(tid) for tid in track_ids)
+            }
+
+            response = self._session.post(url, params=params, timeout=30)
+
+            # Qobuz may return 400 if already favorited, which is fine
+            if response.status_code == 400:
+                logger.debug(f"Some tracks already favorited")
+                return True
+
+            response.raise_for_status()
+            logger.debug(f"Added {len(track_ids)} tracks to favorites in batch")
+            return True
+
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Failed to batch add favorites: {e}")
             return False
     
     def is_track_favorited(self, track_id: int) -> bool:
