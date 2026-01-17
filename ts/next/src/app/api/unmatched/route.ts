@@ -3,11 +3,10 @@
  */
 
 import { NextRequest } from 'next/server';
-import { ensureDbInitialized } from '@/lib/api-helpers';
+import { ensureDbInitialized, jsonError } from '@/lib/api-helpers';
+import { logger } from '@/lib/logger';
 
 export async function GET(request: NextRequest) {
-  const storage = await ensureDbInitialized();
-
   const searchParams = request.nextUrl.searchParams;
   const syncType = searchParams.get('sync_type') || undefined;
   const status = searchParams.get('status') || 'pending';
@@ -17,8 +16,14 @@ export async function GET(request: NextRequest) {
   const limit = Math.min(Math.max(1, parseInt(limitParam, 10) || 100), 500);
   const offset = Math.max(0, parseInt(offsetParam, 10) || 0);
 
-  const tracks = await storage.getUnmatchedTracks(syncType, status, limit, offset);
-  const total = await storage.getUnmatchedCount(syncType, status);
+  try {
+    const storage = await ensureDbInitialized();
+    const tracks = await storage.getUnmatchedTracks(syncType, status, limit, offset);
+    const total = await storage.getUnmatchedCount(syncType, status);
 
-  return Response.json({ tracks, total, limit, offset });
+    return Response.json({ tracks, total, limit, offset });
+  } catch (error) {
+    logger.error(`Failed to fetch unmatched tracks: ${error}`);
+    return jsonError('Failed to fetch unmatched tracks', 500);
+  }
 }

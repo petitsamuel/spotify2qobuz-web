@@ -84,10 +84,21 @@ async function runSync(
 ): Promise<void> {
   const alreadySynced = await storage.getSyncedTrackIds(syncType);
 
-  const syncService = new AsyncSyncService(spotifyClient, qobuzClient, async (progress) => {
-    await storage.updateActiveTask(taskId, 'running', progress as unknown as Record<string, unknown>);
-    await storage.updateTask(taskId, 'running', progress as unknown as Record<string, unknown>);
-  });
+  // Create cancellation checker that queries the database
+  const checkCancelled = async (): Promise<boolean> => {
+    const task = await storage.getActiveTask(taskId);
+    return task?.status === 'cancelled';
+  };
+
+  const syncService = new AsyncSyncService(
+    spotifyClient,
+    qobuzClient,
+    async (progress) => {
+      await storage.updateActiveTask(taskId, 'running', progress as unknown as Record<string, unknown>);
+      await storage.updateTask(taskId, 'running', progress as unknown as Record<string, unknown>);
+    },
+    checkCancelled
+  );
 
   await storage.updateActiveTask(taskId, 'running');
   await storage.updateTask(taskId, 'running');

@@ -45,9 +45,10 @@ export function UnmatchedList({ syncType }: UnmatchedListProps) {
   });
 
   const resolveMutation = useMutation({
-    mutationFn: async ({ spotifyId, qobuzId }: { spotifyId: string; qobuzId: number }) => {
+    mutationFn: async ({ spotifyId, qobuzId, syncType }: { spotifyId: string; qobuzId: number; syncType: string }) => {
       const formData = new FormData();
       formData.append('qobuz_id', String(qobuzId));
+      formData.append('sync_type', syncType);
       const res = await fetch(`/api/unmatched/${spotifyId}/resolve`, {
         method: 'POST',
         body: formData,
@@ -60,8 +61,8 @@ export function UnmatchedList({ syncType }: UnmatchedListProps) {
   });
 
   const dismissMutation = useMutation({
-    mutationFn: async (spotifyId: string) => {
-      const res = await fetch(`/api/unmatched/${spotifyId}/dismiss`, {
+    mutationFn: async ({ spotifyId, syncType }: { spotifyId: string; syncType: string }) => {
+      const res = await fetch(`/api/unmatched/${spotifyId}/dismiss?sync_type=${encodeURIComponent(syncType)}`, {
         method: 'POST',
       });
       return res.json();
@@ -72,11 +73,11 @@ export function UnmatchedList({ syncType }: UnmatchedListProps) {
   });
 
   const handleResolve = (spotifyId: string, qobuzId: number) => {
-    resolveMutation.mutate({ spotifyId, qobuzId });
+    resolveMutation.mutate({ spotifyId, qobuzId, syncType: activeTab });
   };
 
   const handleDismiss = (spotifyId: string) => {
-    dismissMutation.mutate(spotifyId);
+    dismissMutation.mutate({ spotifyId, syncType: activeTab });
   };
 
   const tracks = data?.tracks ?? [];

@@ -12,7 +12,6 @@ export async function POST(
   { params }: { params: Promise<{ spotifyId: string }> }
 ) {
   const { spotifyId } = await params;
-  const storage = await ensureDbInitialized();
 
   // Validate spotifyId
   if (!isValidSpotifyId(spotifyId)) {
@@ -39,22 +38,28 @@ export async function POST(
   }
 
   try {
-    // Add to Qobuz favorites
+    const storage = await ensureDbInitialized();
+
+    // Get Qobuz client - fail if not connected
     const client = await getQobuzClient(storage);
-    if (client) {
-      if (syncType === 'albums') {
-        await client.addFavoriteAlbum(qobuzId);
-      } else {
-        await client.addFavoriteTrack(parseInt(qobuzId, 10));
-      }
+    if (!client) {
+      return jsonError('Qobuz not connected', 401);
     }
 
+    // Add to Qobuz favorites
+    if (syncType === 'albums') {
+      await client.addFavoriteAlbum(qobuzId);
+    } else {
+      await client.addFavoriteTrack(parseInt(qobuzId, 10));
+    }
+
+    // Only mark as synced after successfully adding to Qobuz
     await storage.markTrackSynced(spotifyId, qobuzId, syncType);
     await storage.resolveUnmatchedTrack(spotifyId, syncType, qobuzId);
 
     return Response.json({ success: true });
   } catch (error) {
     logger.error(`Failed to resolve track ${spotifyId}: ${error}`);
-    return jsonError(String(error), 500);
+    return jsonError('Failed to resolve track', 500);
   }
 }

@@ -43,6 +43,7 @@ function stripEditionSuffix(title: string): string {
 
 type ProgressCallback = (progress: SyncProgress) => void;
 type TrackSyncedCallback = (spotifyId: string, qobuzId: string) => void;
+type CancellationChecker = () => Promise<boolean>;
 
 // Batch sizes
 const FAVORITE_BATCH_SIZE = 25;
@@ -126,21 +127,48 @@ export class AsyncSyncService {
   private matcher: TrackMatcher;
   private progress: ProgressTracker;
   private cancelled = false;
+  private checkCancelled?: CancellationChecker;
+  private lastCancellationCheck = 0;
+  private cancellationCheckInterval = 2000; // Check every 2 seconds
 
   constructor(
     spotifyClient: SpotifyClient,
     qobuzClient: QobuzClient,
-    progressCallback?: ProgressCallback
+    progressCallback?: ProgressCallback,
+    cancellationChecker?: CancellationChecker
   ) {
     this.spotifyClient = spotifyClient;
     this.qobuzClient = qobuzClient;
     this.matcher = new TrackMatcher(qobuzClient);
     this.progress = new ProgressTracker(progressCallback);
+    this.checkCancelled = cancellationChecker;
   }
 
   cancel(): void {
     this.cancelled = true;
     logger.info('Sync cancellation requested');
+  }
+
+  /**
+   * Check if sync has been cancelled (from internal flag or external checker).
+   * Throttled to avoid excessive DB queries.
+   */
+  private async isCancelled(): Promise<boolean> {
+    if (this.cancelled) return true;
+
+    if (this.checkCancelled) {
+      const now = Date.now();
+      if (now - this.lastCancellationCheck >= this.cancellationCheckInterval) {
+        this.lastCancellationCheck = now;
+        const cancelled = await this.checkCancelled();
+        if (cancelled) {
+          this.cancelled = true;
+          return true;
+        }
+      }
+    }
+
+    return false;
   }
 
   /**
@@ -340,7 +368,7 @@ export class AsyncSyncService {
 
       // Stream tracks from Spotify
       for await (const { track, spotifyId, total } of this.spotifyClient.iterSavedTracks()) {
-        if (this.cancelled) {
+        if (await this.isCancelled()) {
           logger.info('Sync cancelled by user');
           report.errors.push('Cancelled by user');
           break;
@@ -492,7 +520,7 @@ export class AsyncSyncService {
 
       // Stream albums from Spotify
       for await (const { album, spotifyId, total } of this.spotifyClient.iterSavedAlbums()) {
-        if (this.cancelled) {
+        if (await this.isCancelled()) {
           logger.info('Album sync cancelled by user');
           report.errors.push('Cancelled by user');
           break;
