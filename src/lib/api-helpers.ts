@@ -7,6 +7,7 @@ import { Storage } from './db/storage';
 import { SpotifyClient, SpotifyCredentials } from './services/spotify';
 import { QobuzClient } from './services/qobuz';
 import { QobuzCredentials } from './types';
+import { logger } from './logger';
 
 // Cookie name for user session
 export const USER_ID_COOKIE = 'spotify_user_id';
@@ -27,8 +28,16 @@ let dbInitialized = false;
 export async function ensureDbInitialized(): Promise<Storage> {
   const storage = getStorage();
   if (!dbInitialized) {
-    await storage.initDb();
-    dbInitialized = true;
+    try {
+      await storage.initDb();
+      dbInitialized = true;
+      logger.info('Database initialized successfully');
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      logger.error(`Critical database initialization failure: ${errorMsg}`);
+      // Don't set dbInitialized = true, so next request will retry
+      throw new Error(`Failed to initialize database. The application cannot start. Error: ${errorMsg}`);
+    }
   }
   return storage;
 }

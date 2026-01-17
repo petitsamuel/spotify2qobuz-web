@@ -292,66 +292,179 @@ export class Storage {
 
     // Ensure UNIQUE constraints exist on all tables (handles legacy databases where
     // user_id column was added but constraints weren't updated)
-    await this.sql`
-      DO $$
-      BEGIN
-        -- Drop old credentials constraint if it exists (legacy single-user constraint)
-        IF EXISTS (
+    try {
+      logger.info('Starting UNIQUE constraint migration');
+
+      // --- CREDENTIALS TABLE ---
+
+      // Drop old single-user constraint if it exists
+      await this.sql`
+        DO $$
+        BEGIN
+          IF EXISTS (
+            SELECT 1 FROM pg_constraint
+            WHERE conname = 'credentials_service_key' AND conrelid = 'credentials'::regclass
+          ) THEN
+            ALTER TABLE credentials DROP CONSTRAINT credentials_service_key;
+          END IF;
+        EXCEPTION WHEN OTHERS THEN
+          RAISE NOTICE 'Error dropping old credentials constraint: %', SQLERRM;
+          RAISE;
+        END $$;
+      `;
+
+      // Deduplicate credentials (keep most recent by id - higher id = newer)
+      const credentialsDedup = await this.sql`
+        WITH deleted AS (
+          DELETE FROM credentials a USING credentials b
+          WHERE a.id < b.id AND a.user_id = b.user_id AND a.service = b.service
+          RETURNING a.id
+        )
+        SELECT COUNT(*) as count FROM deleted
+      `;
+      const credentialsDedupCount = Number(this.toRows(credentialsDedup)[0]?.count || 0);
+      if (credentialsDedupCount > 0) {
+        logger.warn(`Deduplicated ${credentialsDedupCount} old credential records`);
+      }
+
+      // Create new multi-user constraint
+      await this.sql`
+        DO $$
+        BEGIN
+          IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint
+            WHERE conname = 'credentials_user_id_service_key' AND conrelid = 'credentials'::regclass
+          ) THEN
+            ALTER TABLE credentials ADD CONSTRAINT credentials_user_id_service_key UNIQUE (user_id, service);
+          END IF;
+        EXCEPTION WHEN OTHERS THEN
+          RAISE NOTICE 'Error creating credentials constraint: %', SQLERRM;
+          RAISE;
+        END $$;
+      `;
+
+      // --- SYNCED_TRACKS TABLE ---
+
+      // Deduplicate synced_tracks (keep most recent by id)
+      const syncedTracksDedup = await this.sql`
+        WITH deleted AS (
+          DELETE FROM synced_tracks a USING synced_tracks b
+          WHERE a.id < b.id AND a.user_id = b.user_id AND a.spotify_id = b.spotify_id AND a.sync_type = b.sync_type
+          RETURNING a.id
+        )
+        SELECT COUNT(*) as count FROM deleted
+      `;
+      const syncedTracksDedupCount = Number(this.toRows(syncedTracksDedup)[0]?.count || 0);
+      if (syncedTracksDedupCount > 0) {
+        logger.warn(`Deduplicated ${syncedTracksDedupCount} old synced_tracks records`);
+      }
+
+      // Create synced_tracks constraint
+      await this.sql`
+        DO $$
+        BEGIN
+          IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint
+            WHERE conname = 'synced_tracks_user_id_spotify_id_sync_type_key' AND conrelid = 'synced_tracks'::regclass
+          ) THEN
+            ALTER TABLE synced_tracks ADD CONSTRAINT synced_tracks_user_id_spotify_id_sync_type_key UNIQUE (user_id, spotify_id, sync_type);
+          END IF;
+        EXCEPTION WHEN OTHERS THEN
+          RAISE NOTICE 'Error creating synced_tracks constraint: %', SQLERRM;
+          RAISE;
+        END $$;
+      `;
+
+      // --- SYNC_PROGRESS TABLE ---
+
+      // Deduplicate sync_progress (keep most recent by id)
+      const syncProgressDedup = await this.sql`
+        WITH deleted AS (
+          DELETE FROM sync_progress a USING sync_progress b
+          WHERE a.id < b.id AND a.user_id = b.user_id AND a.sync_type = b.sync_type
+          RETURNING a.id
+        )
+        SELECT COUNT(*) as count FROM deleted
+      `;
+      const syncProgressDedupCount = Number(this.toRows(syncProgressDedup)[0]?.count || 0);
+      if (syncProgressDedupCount > 0) {
+        logger.warn(`Deduplicated ${syncProgressDedupCount} old sync_progress records`);
+      }
+
+      // Create sync_progress constraint
+      await this.sql`
+        DO $$
+        BEGIN
+          IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint
+            WHERE conname = 'sync_progress_user_id_sync_type_key' AND conrelid = 'sync_progress'::regclass
+          ) THEN
+            ALTER TABLE sync_progress ADD CONSTRAINT sync_progress_user_id_sync_type_key UNIQUE (user_id, sync_type);
+          END IF;
+        EXCEPTION WHEN OTHERS THEN
+          RAISE NOTICE 'Error creating sync_progress constraint: %', SQLERRM;
+          RAISE;
+        END $$;
+      `;
+
+      // --- UNMATCHED_TRACKS TABLE ---
+
+      // Deduplicate unmatched_tracks (keep most recent by id)
+      const unmatchedTracksDedup = await this.sql`
+        WITH deleted AS (
+          DELETE FROM unmatched_tracks a USING unmatched_tracks b
+          WHERE a.id < b.id AND a.user_id = b.user_id AND a.spotify_id = b.spotify_id AND a.sync_type = b.sync_type
+          RETURNING a.id
+        )
+        SELECT COUNT(*) as count FROM deleted
+      `;
+      const unmatchedTracksDedupCount = Number(this.toRows(unmatchedTracksDedup)[0]?.count || 0);
+      if (unmatchedTracksDedupCount > 0) {
+        logger.warn(`Deduplicated ${unmatchedTracksDedupCount} old unmatched_tracks records`);
+      }
+
+      // Create unmatched_tracks constraint
+      await this.sql`
+        DO $$
+        BEGIN
+          IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint
+            WHERE conname = 'unmatched_tracks_user_id_spotify_id_sync_type_key' AND conrelid = 'unmatched_tracks'::regclass
+          ) THEN
+            ALTER TABLE unmatched_tracks ADD CONSTRAINT unmatched_tracks_user_id_spotify_id_sync_type_key UNIQUE (user_id, spotify_id, sync_type);
+          END IF;
+        EXCEPTION WHEN OTHERS THEN
+          RAISE NOTICE 'Error creating unmatched_tracks constraint: %', SQLERRM;
+          RAISE;
+        END $$;
+      `;
+
+      // Verify all constraints were created successfully
+      const requiredConstraints = [
+        { table: 'credentials', constraint: 'credentials_user_id_service_key' },
+        { table: 'synced_tracks', constraint: 'synced_tracks_user_id_spotify_id_sync_type_key' },
+        { table: 'sync_progress', constraint: 'sync_progress_user_id_sync_type_key' },
+        { table: 'unmatched_tracks', constraint: 'unmatched_tracks_user_id_spotify_id_sync_type_key' },
+      ];
+
+      for (const { table, constraint } of requiredConstraints) {
+        const result = await this.sql`
           SELECT 1 FROM pg_constraint
-          WHERE conname = 'credentials_service_key' AND conrelid = 'credentials'::regclass
-        ) THEN
-          ALTER TABLE credentials DROP CONSTRAINT credentials_service_key;
-        END IF;
+          WHERE conname = ${constraint} AND conrelid = ${table}::regclass
+        `;
+        if (this.toRows(result).length === 0) {
+          const errorMsg = `CRITICAL: Required constraint ${constraint} on ${table} was not created`;
+          logger.error(errorMsg);
+          throw new Error(`Database migration failed: constraint ${constraint} on ${table} does not exist. ON CONFLICT operations will fail.`);
+        }
+      }
 
-        -- Deduplicate credentials before adding constraint (keeps most recent by id)
-        DELETE FROM credentials a USING credentials b
-        WHERE a.id > b.id AND a.user_id = b.user_id AND a.service = b.service;
-
-        -- Create new multi-user constraint if it doesn't exist
-        IF NOT EXISTS (
-          SELECT 1 FROM pg_constraint
-          WHERE conname = 'credentials_user_id_service_key' AND conrelid = 'credentials'::regclass
-        ) THEN
-          ALTER TABLE credentials ADD CONSTRAINT credentials_user_id_service_key UNIQUE (user_id, service);
-        END IF;
-
-        -- Deduplicate synced_tracks before adding constraint
-        DELETE FROM synced_tracks a USING synced_tracks b
-        WHERE a.id > b.id AND a.user_id = b.user_id AND a.spotify_id = b.spotify_id AND a.sync_type = b.sync_type;
-
-        -- Ensure synced_tracks has the correct unique constraint
-        IF NOT EXISTS (
-          SELECT 1 FROM pg_constraint
-          WHERE conname = 'synced_tracks_user_id_spotify_id_sync_type_key' AND conrelid = 'synced_tracks'::regclass
-        ) THEN
-          ALTER TABLE synced_tracks ADD CONSTRAINT synced_tracks_user_id_spotify_id_sync_type_key UNIQUE (user_id, spotify_id, sync_type);
-        END IF;
-
-        -- Deduplicate sync_progress before adding constraint
-        DELETE FROM sync_progress a USING sync_progress b
-        WHERE a.id > b.id AND a.user_id = b.user_id AND a.sync_type = b.sync_type;
-
-        -- Ensure sync_progress has the correct unique constraint
-        IF NOT EXISTS (
-          SELECT 1 FROM pg_constraint
-          WHERE conname = 'sync_progress_user_id_sync_type_key' AND conrelid = 'sync_progress'::regclass
-        ) THEN
-          ALTER TABLE sync_progress ADD CONSTRAINT sync_progress_user_id_sync_type_key UNIQUE (user_id, sync_type);
-        END IF;
-
-        -- Deduplicate unmatched_tracks before adding constraint
-        DELETE FROM unmatched_tracks a USING unmatched_tracks b
-        WHERE a.id > b.id AND a.user_id = b.user_id AND a.spotify_id = b.spotify_id AND a.sync_type = b.sync_type;
-
-        -- Ensure unmatched_tracks has the correct unique constraint
-        IF NOT EXISTS (
-          SELECT 1 FROM pg_constraint
-          WHERE conname = 'unmatched_tracks_user_id_spotify_id_sync_type_key' AND conrelid = 'unmatched_tracks'::regclass
-        ) THEN
-          ALTER TABLE unmatched_tracks ADD CONSTRAINT unmatched_tracks_user_id_spotify_id_sync_type_key UNIQUE (user_id, spotify_id, sync_type);
-        END IF;
-      END $$;
-    `;
+      logger.info('UNIQUE constraint migration completed successfully');
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      logger.error(`Database migration failed: ${errorMsg}. UNIQUE constraints may not be created. This will cause ON CONFLICT errors.`);
+      throw new Error(`Critical database migration failure: ${errorMsg}`);
+    }
 
     // Create indexes for performance (safe now that columns are guaranteed to exist)
     await this.sql`CREATE INDEX IF NOT EXISTS idx_credentials_user ON credentials(user_id)`;
