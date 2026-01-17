@@ -290,6 +290,53 @@ export class Storage {
       END $$;
     `;
 
+    // Ensure UNIQUE constraints exist on all tables (handles legacy databases where
+    // user_id column was added but constraints weren't updated)
+    await this.sql`
+      DO $$
+      BEGIN
+        -- Drop old credentials constraint if it exists (legacy single-user constraint)
+        IF EXISTS (
+          SELECT 1 FROM pg_constraint
+          WHERE conname = 'credentials_service_key'
+        ) THEN
+          ALTER TABLE credentials DROP CONSTRAINT credentials_service_key;
+        END IF;
+
+        -- Create new multi-user constraint if it doesn't exist
+        IF NOT EXISTS (
+          SELECT 1 FROM pg_constraint
+          WHERE conname = 'credentials_user_id_service_key'
+        ) THEN
+          ALTER TABLE credentials ADD CONSTRAINT credentials_user_id_service_key UNIQUE (user_id, service);
+        END IF;
+
+        -- Ensure synced_tracks has the correct unique constraint
+        IF NOT EXISTS (
+          SELECT 1 FROM pg_constraint
+          WHERE conname = 'synced_tracks_user_id_spotify_id_sync_type_key'
+        ) THEN
+          ALTER TABLE synced_tracks ADD CONSTRAINT synced_tracks_user_id_spotify_id_sync_type_key UNIQUE (user_id, spotify_id, sync_type);
+        END IF;
+
+        -- Ensure sync_progress has the correct unique constraint
+        IF NOT EXISTS (
+          SELECT 1 FROM pg_constraint
+          WHERE conname = 'sync_progress_user_id_sync_type_key'
+        ) THEN
+          ALTER TABLE sync_progress ADD CONSTRAINT sync_progress_user_id_sync_type_key UNIQUE (user_id, sync_type);
+        END IF;
+
+        -- Ensure unmatched_tracks has the correct unique constraint
+        IF NOT EXISTS (
+          SELECT 1 FROM pg_constraint
+          WHERE conname = 'unmatched_tracks_user_id_spotify_id_sync_type_key'
+        ) THEN
+          ALTER TABLE unmatched_tracks ADD CONSTRAINT unmatched_tracks_user_id_spotify_id_sync_type_key UNIQUE (user_id, spotify_id, sync_type);
+        END IF;
+      END $$;
+    `;
+
     // Create indexes for performance (safe now that columns are guaranteed to exist)
     await this.sql`CREATE INDEX IF NOT EXISTS idx_credentials_user ON credentials(user_id)`;
     await this.sql`CREATE INDEX IF NOT EXISTS idx_migrations_user ON migrations(user_id)`;
