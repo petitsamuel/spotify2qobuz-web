@@ -101,6 +101,53 @@ export class Storage {
     return [];
   }
 
+  /**
+   * Ensures a UNIQUE constraint exists on a table, handling legacy constraints and deduplication.
+   * @param tableName The table to add the constraint to
+   * @param oldConstraint Legacy constraint name to drop (if it exists), or null if none
+   * @param newConstraint The new constraint name to create
+   * @param columns Array of column names that form the unique constraint
+   */
+  private async ensureUniqueConstraint(
+    tableName: string,
+    oldConstraint: string | null,
+    newConstraint: string,
+    columns: string[]
+  ): Promise<void> {
+    const columnsList = columns.join(', ');
+    const deduplicationCondition = columns.map((col) => `a.${col} = b.${col}`).join(' AND ');
+
+    const dropLegacyBlock = oldConstraint
+      ? `
+        IF EXISTS (
+          SELECT 1 FROM pg_constraint
+          WHERE conname = '${oldConstraint}' AND conrelid = '${tableName}'::regclass
+        ) THEN
+          ALTER TABLE ${tableName} DROP CONSTRAINT ${oldConstraint};
+        END IF;
+      `
+      : '';
+
+    const sqlBlock = `
+      DO $$
+      BEGIN
+        ${dropLegacyBlock}
+
+        DELETE FROM ${tableName} a USING ${tableName} b
+        WHERE a.id > b.id AND ${deduplicationCondition};
+
+        IF NOT EXISTS (
+          SELECT 1 FROM pg_constraint
+          WHERE conname = '${newConstraint}' AND conrelid = '${tableName}'::regclass
+        ) THEN
+          ALTER TABLE ${tableName} ADD CONSTRAINT ${newConstraint} UNIQUE (${columnsList});
+        END IF;
+      END $$;
+    `;
+
+    await this.sql.unsafe(sqlBlock);
+  }
+
   async initDb(): Promise<void> {
     // Credentials now keyed by (user_id, service) for multi-user support
     await this.sql`
@@ -292,66 +339,33 @@ export class Storage {
 
     // Ensure UNIQUE constraints exist on all tables (handles legacy databases where
     // user_id column was added but constraints weren't updated)
-    await this.sql`
-      DO $$
-      BEGIN
-        -- Drop old credentials constraint if it exists (legacy single-user constraint)
-        IF EXISTS (
-          SELECT 1 FROM pg_constraint
-          WHERE conname = 'credentials_service_key' AND conrelid = 'credentials'::regclass
-        ) THEN
-          ALTER TABLE credentials DROP CONSTRAINT credentials_service_key;
-        END IF;
+    await this.ensureUniqueConstraint(
+      'credentials',
+      'credentials_service_key',
+      'credentials_user_id_service_key',
+      ['user_id', 'service']
+    );
 
-        -- Deduplicate credentials before adding constraint (keeps most recent by id)
-        DELETE FROM credentials a USING credentials b
-        WHERE a.id > b.id AND a.user_id = b.user_id AND a.service = b.service;
+    await this.ensureUniqueConstraint(
+      'synced_tracks',
+      null,
+      'synced_tracks_user_id_spotify_id_sync_type_key',
+      ['user_id', 'spotify_id', 'sync_type']
+    );
 
-        -- Create new multi-user constraint if it doesn't exist
-        IF NOT EXISTS (
-          SELECT 1 FROM pg_constraint
-          WHERE conname = 'credentials_user_id_service_key' AND conrelid = 'credentials'::regclass
-        ) THEN
-          ALTER TABLE credentials ADD CONSTRAINT credentials_user_id_service_key UNIQUE (user_id, service);
-        END IF;
+    await this.ensureUniqueConstraint(
+      'sync_progress',
+      null,
+      'sync_progress_user_id_sync_type_key',
+      ['user_id', 'sync_type']
+    );
 
-        -- Deduplicate synced_tracks before adding constraint
-        DELETE FROM synced_tracks a USING synced_tracks b
-        WHERE a.id > b.id AND a.user_id = b.user_id AND a.spotify_id = b.spotify_id AND a.sync_type = b.sync_type;
-
-        -- Ensure synced_tracks has the correct unique constraint
-        IF NOT EXISTS (
-          SELECT 1 FROM pg_constraint
-          WHERE conname = 'synced_tracks_user_id_spotify_id_sync_type_key' AND conrelid = 'synced_tracks'::regclass
-        ) THEN
-          ALTER TABLE synced_tracks ADD CONSTRAINT synced_tracks_user_id_spotify_id_sync_type_key UNIQUE (user_id, spotify_id, sync_type);
-        END IF;
-
-        -- Deduplicate sync_progress before adding constraint
-        DELETE FROM sync_progress a USING sync_progress b
-        WHERE a.id > b.id AND a.user_id = b.user_id AND a.sync_type = b.sync_type;
-
-        -- Ensure sync_progress has the correct unique constraint
-        IF NOT EXISTS (
-          SELECT 1 FROM pg_constraint
-          WHERE conname = 'sync_progress_user_id_sync_type_key' AND conrelid = 'sync_progress'::regclass
-        ) THEN
-          ALTER TABLE sync_progress ADD CONSTRAINT sync_progress_user_id_sync_type_key UNIQUE (user_id, sync_type);
-        END IF;
-
-        -- Deduplicate unmatched_tracks before adding constraint
-        DELETE FROM unmatched_tracks a USING unmatched_tracks b
-        WHERE a.id > b.id AND a.user_id = b.user_id AND a.spotify_id = b.spotify_id AND a.sync_type = b.sync_type;
-
-        -- Ensure unmatched_tracks has the correct unique constraint
-        IF NOT EXISTS (
-          SELECT 1 FROM pg_constraint
-          WHERE conname = 'unmatched_tracks_user_id_spotify_id_sync_type_key' AND conrelid = 'unmatched_tracks'::regclass
-        ) THEN
-          ALTER TABLE unmatched_tracks ADD CONSTRAINT unmatched_tracks_user_id_spotify_id_sync_type_key UNIQUE (user_id, spotify_id, sync_type);
-        END IF;
-      END $$;
-    `;
+    await this.ensureUniqueConstraint(
+      'unmatched_tracks',
+      null,
+      'unmatched_tracks_user_id_spotify_id_sync_type_key',
+      ['user_id', 'spotify_id', 'sync_type']
+    );
 
     // Create indexes for performance (safe now that columns are guaranteed to exist)
     await this.sql`CREATE INDEX IF NOT EXISTS idx_credentials_user ON credentials(user_id)`;
