@@ -3,7 +3,7 @@
  */
 
 import { NextRequest } from 'next/server';
-import { ensureDbInitialized, jsonError } from '@/lib/api-helpers';
+import { ensureDbInitialized, getCurrentUserId, jsonError } from '@/lib/api-helpers';
 import { isValidSpotifyId } from '@/lib/types';
 import { logger } from '@/lib/logger';
 
@@ -11,6 +11,11 @@ export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ spotifyId: string }> }
 ) {
+  const userId = await getCurrentUserId();
+  if (!userId) {
+    return jsonError('Not authenticated', 401);
+  }
+
   const { spotifyId } = await params;
 
   // Validate spotifyId
@@ -23,7 +28,7 @@ export async function POST(
 
   try {
     const storage = await ensureDbInitialized();
-    await storage.dismissUnmatchedTrack(spotifyId, syncType);
+    await storage.dismissUnmatchedTrack(userId, spotifyId, syncType);
     return Response.json({ success: true });
   } catch (error) {
     logger.error(`Failed to dismiss track ${spotifyId}: ${error}`);

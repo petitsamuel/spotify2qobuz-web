@@ -3,10 +3,15 @@
  */
 
 import { NextRequest } from 'next/server';
-import { ensureDbInitialized, jsonError } from '@/lib/api-helpers';
+import { ensureDbInitialized, getCurrentUserId, jsonError } from '@/lib/api-helpers';
 import { logger } from '@/lib/logger';
 
 export async function GET(request: NextRequest) {
+  const userId = await getCurrentUserId();
+  if (!userId) {
+    return jsonError('Not authenticated', 401);
+  }
+
   const searchParams = request.nextUrl.searchParams;
   const syncType = searchParams.get('sync_type') || undefined;
   const status = searchParams.get('status') || 'pending';
@@ -18,8 +23,8 @@ export async function GET(request: NextRequest) {
 
   try {
     const storage = await ensureDbInitialized();
-    const tracks = await storage.getUnmatchedTracks(syncType, status, limit, offset);
-    const total = await storage.getUnmatchedCount(syncType, status);
+    const tracks = await storage.getUnmatchedTracks(userId, syncType, status, limit, offset);
+    const total = await storage.getUnmatchedCount(userId, syncType, status);
 
     return Response.json({ tracks, total, limit, offset });
   } catch (error) {

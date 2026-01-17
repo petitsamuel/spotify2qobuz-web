@@ -3,7 +3,7 @@
  */
 
 import { NextRequest } from 'next/server';
-import { ensureDbInitialized, getQobuzClient, jsonError } from '@/lib/api-helpers';
+import { ensureDbInitialized, getQobuzClient, getCurrentUserId, jsonError } from '@/lib/api-helpers';
 import { logger } from '@/lib/logger';
 import { isValidSpotifyId, isValidQobuzTrackId, isValidQobuzAlbumId } from '@/lib/types';
 
@@ -11,6 +11,11 @@ export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ spotifyId: string }> }
 ) {
+  const userId = await getCurrentUserId();
+  if (!userId) {
+    return jsonError('Not authenticated', 401);
+  }
+
   const { spotifyId } = await params;
 
   // Validate spotifyId
@@ -41,7 +46,7 @@ export async function POST(
     const storage = await ensureDbInitialized();
 
     // Get Qobuz client - fail if not connected
-    const client = await getQobuzClient(storage);
+    const client = await getQobuzClient(storage, userId);
     if (!client) {
       return jsonError('Qobuz not connected', 401);
     }
@@ -54,8 +59,8 @@ export async function POST(
     }
 
     // Only mark as synced after successfully adding to Qobuz
-    await storage.markTrackSynced(spotifyId, qobuzId, syncType);
-    await storage.resolveUnmatchedTrack(spotifyId, syncType, qobuzId);
+    await storage.markTrackSynced(userId, spotifyId, qobuzId, syncType);
+    await storage.resolveUnmatchedTrack(userId, spotifyId, syncType, qobuzId);
 
     return Response.json({ success: true });
   } catch (error) {

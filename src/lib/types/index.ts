@@ -7,7 +7,7 @@
 
 export type MigrationStatus = 'running' | 'completed' | 'failed' | 'interrupted';
 
-export type TaskStatus = 'pending' | 'starting' | 'running' | 'completed' | 'failed' | 'cancelled';
+export type TaskStatus = 'pending' | 'starting' | 'running' | 'chunk_complete' | 'completed' | 'failed' | 'cancelled';
 
 export type SyncType = 'favorites' | 'albums' | 'playlists';
 
@@ -126,12 +126,36 @@ interface CancelledTask extends BaseActiveTask {
   progress: SyncProgress;
 }
 
+interface ChunkCompleteTask extends BaseActiveTask {
+  status: 'chunk_complete';
+  progress: SyncProgress;
+  chunkState: ChunkState;
+}
+
 export type ActiveTask =
   | StartingTask
   | RunningTask
   | CompletedTask
   | FailedTask
-  | CancelledTask;
+  | CancelledTask
+  | ChunkCompleteTask;
+
+// === Chunked Sync Types ===
+
+export interface ChunkState {
+  offset: number;
+  totalItems: number;
+  processedInChunk: number;
+  hasMore: boolean;
+}
+
+export interface ChunkResult {
+  hasMore: boolean;
+  nextOffset: number;
+  totalItems: number;
+  processedInChunk: number;
+  partialReport: Partial<SyncReport | AlbumSyncReport>;
+}
 
 // === OAuth State ===
 

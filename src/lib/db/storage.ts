@@ -33,6 +33,7 @@ export interface Migration {
 
 export interface SyncTask {
   id: string;
+  user_id: string;
   migration_id: number;
   status: string;
   progress_json: string | null;
@@ -101,18 +102,23 @@ export class Storage {
   }
 
   async initDb(): Promise<void> {
+    // Credentials now keyed by (user_id, service) for multi-user support
     await this.sql`
       CREATE TABLE IF NOT EXISTS credentials (
         id SERIAL PRIMARY KEY,
-        service TEXT UNIQUE NOT NULL,
+        user_id TEXT NOT NULL,
+        service TEXT NOT NULL,
         data TEXT NOT NULL,
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        UNIQUE(user_id, service)
       )
     `;
 
+    // Migrations track sync history per user
     await this.sql`
       CREATE TABLE IF NOT EXISTS migrations (
         id SERIAL PRIMARY KEY,
+        user_id TEXT NOT NULL,
         started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         completed_at TIMESTAMPTZ,
         status TEXT NOT NULL,
@@ -131,6 +137,7 @@ export class Storage {
     await this.sql`
       CREATE TABLE IF NOT EXISTS sync_tasks (
         id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
         migration_id INTEGER REFERENCES migrations(id),
         status TEXT NOT NULL,
         progress_json TEXT,
@@ -139,27 +146,37 @@ export class Storage {
       )
     `;
 
+    // Synced tracks keyed by (user_id, spotify_id, sync_type) for multi-user support
     await this.sql`
       CREATE TABLE IF NOT EXISTS synced_tracks (
-        spotify_id TEXT PRIMARY KEY,
+        id SERIAL PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        spotify_id TEXT NOT NULL,
         qobuz_id TEXT,
         sync_type TEXT NOT NULL,
-        synced_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        synced_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        UNIQUE(user_id, spotify_id, sync_type)
       )
     `;
 
+    // Sync progress per user
     await this.sql`
       CREATE TABLE IF NOT EXISTS sync_progress (
-        sync_type TEXT PRIMARY KEY,
+        id SERIAL PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        sync_type TEXT NOT NULL,
         last_offset INTEGER DEFAULT 0,
         total_tracks INTEGER DEFAULT 0,
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        UNIQUE(user_id, sync_type)
       )
     `;
 
+    // Unmatched tracks per user
     await this.sql`
       CREATE TABLE IF NOT EXISTS unmatched_tracks (
         id SERIAL PRIMARY KEY,
+        user_id TEXT NOT NULL,
         spotify_id TEXT NOT NULL,
         title TEXT NOT NULL,
         artist TEXT NOT NULL,
@@ -170,7 +187,7 @@ export class Storage {
         resolved_qobuz_id TEXT,
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        UNIQUE(spotify_id, sync_type)
+        UNIQUE(user_id, spotify_id, sync_type)
       )
     `;
 
@@ -188,6 +205,7 @@ export class Storage {
     await this.sql`
       CREATE TABLE IF NOT EXISTS active_tasks (
         id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
         migration_id INTEGER REFERENCES migrations(id),
         sync_type TEXT NOT NULL,
         status TEXT NOT NULL,
@@ -195,16 +213,31 @@ export class Storage {
         progress_json TEXT,
         error TEXT,
         report_json TEXT,
+        chunk_state_json TEXT,
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )
     `;
 
+    // Add chunk_state_json column if it doesn't exist (for existing deployments)
+    await this.sql`
+      DO $$ BEGIN
+        ALTER TABLE active_tasks ADD COLUMN IF NOT EXISTS chunk_state_json TEXT;
+      EXCEPTION WHEN duplicate_column THEN NULL;
+      END $$;
+    `;
+
     // Create indexes for performance
+    await this.sql`CREATE INDEX IF NOT EXISTS idx_credentials_user ON credentials(user_id)`;
+    await this.sql`CREATE INDEX IF NOT EXISTS idx_migrations_user ON migrations(user_id)`;
+    await this.sql`CREATE INDEX IF NOT EXISTS idx_sync_tasks_user ON sync_tasks(user_id)`;
+    await this.sql`CREATE INDEX IF NOT EXISTS idx_synced_tracks_user ON synced_tracks(user_id)`;
     await this.sql`CREATE INDEX IF NOT EXISTS idx_synced_tracks_sync_type ON synced_tracks(sync_type)`;
+    await this.sql`CREATE INDEX IF NOT EXISTS idx_unmatched_user ON unmatched_tracks(user_id)`;
     await this.sql`CREATE INDEX IF NOT EXISTS idx_unmatched_status ON unmatched_tracks(status)`;
     await this.sql`CREATE INDEX IF NOT EXISTS idx_migrations_started ON migrations(started_at DESC)`;
     await this.sql`CREATE INDEX IF NOT EXISTS idx_oauth_state_expires ON oauth_state(expires_at)`;
+    await this.sql`CREATE INDEX IF NOT EXISTS idx_active_tasks_user ON active_tasks(user_id)`;
     await this.sql`CREATE INDEX IF NOT EXISTS idx_active_tasks_status ON active_tasks(status)`;
 
     logger.info('Database initialized');
@@ -252,12 +285,12 @@ export class Storage {
 
   // --- Credentials ---
 
-  async saveCredentials(service: string, credentials: Record<string, unknown>): Promise<void> {
+  async saveCredentials(userId: string, service: string, credentials: Record<string, unknown>): Promise<void> {
     const encrypted = encrypt(JSON.stringify(credentials), this.encryptionKey);
     await this.sql`
-      INSERT INTO credentials (service, data, updated_at)
-      VALUES (${service}, ${encrypted}, NOW())
-      ON CONFLICT (service) DO UPDATE SET data = ${encrypted}, updated_at = NOW()
+      INSERT INTO credentials (user_id, service, data, updated_at)
+      VALUES (${userId}, ${service}, ${encrypted}, NOW())
+      ON CONFLICT (user_id, service) DO UPDATE SET data = ${encrypted}, updated_at = NOW()
     `;
   }
 
@@ -266,8 +299,8 @@ export class Storage {
    * @throws DecryptionError if decryption fails (e.g., key changed)
    * @returns null if no credentials exist for the service
    */
-  async getCredentials(service: string): Promise<Record<string, unknown> | null> {
-    const result = await this.sql`SELECT data FROM credentials WHERE service = ${service}`;
+  async getCredentials(userId: string, service: string): Promise<Record<string, unknown> | null> {
+    const result = await this.sql`SELECT data FROM credentials WHERE user_id = ${userId} AND service = ${service}`;
     const rows = this.toRows(result);
     if (rows.length === 0) {
       return null;
@@ -282,21 +315,21 @@ export class Storage {
     }
   }
 
-  async hasCredentials(service: string): Promise<boolean> {
-    const result = await this.sql`SELECT 1 FROM credentials WHERE service = ${service}`;
+  async hasCredentials(userId: string, service: string): Promise<boolean> {
+    const result = await this.sql`SELECT 1 FROM credentials WHERE user_id = ${userId} AND service = ${service}`;
     return this.toRows(result).length > 0;
   }
 
-  async deleteCredentials(service: string): Promise<void> {
-    await this.sql`DELETE FROM credentials WHERE service = ${service}`;
+  async deleteCredentials(userId: string, service: string): Promise<void> {
+    await this.sql`DELETE FROM credentials WHERE user_id = ${userId} AND service = ${service}`;
   }
 
   // --- Migrations ---
 
-  async createMigration(migrationType: string, dryRun: boolean = false): Promise<number> {
+  async createMigration(userId: string, migrationType: string, dryRun: boolean = false): Promise<number> {
     const result = await this.sql`
-      INSERT INTO migrations (status, migration_type, dry_run)
-      VALUES ('running', ${migrationType}, ${dryRun})
+      INSERT INTO migrations (user_id, status, migration_type, dry_run)
+      VALUES (${userId}, 'running', ${migrationType}, ${dryRun})
       RETURNING id
     `;
     const rows = this.toRows(result);
@@ -343,19 +376,19 @@ export class Storage {
     return rows.length > 0 ? rows[0] as unknown as Migration : null;
   }
 
-  async getMigrations(limit: number = 20): Promise<Migration[]> {
+  async getMigrations(userId: string, limit: number = 20): Promise<Migration[]> {
     const result = await this.sql`
-      SELECT * FROM migrations ORDER BY started_at DESC LIMIT ${limit}
+      SELECT * FROM migrations WHERE user_id = ${userId} ORDER BY started_at DESC LIMIT ${limit}
     `;
     return this.toRows(result) as unknown as Migration[];
   }
 
   // --- Tasks ---
 
-  async createTask(taskId: string, migrationId: number): Promise<string> {
+  async createTask(userId: string, taskId: string, migrationId: number): Promise<string> {
     await this.sql`
-      INSERT INTO sync_tasks (id, migration_id, status)
-      VALUES (${taskId}, ${migrationId}, 'pending')
+      INSERT INTO sync_tasks (id, user_id, migration_id, status)
+      VALUES (${taskId}, ${userId}, ${migrationId}, 'pending')
     `;
     return taskId;
   }
@@ -384,6 +417,7 @@ export class Storage {
   // --- Active Tasks (Database-backed for multi-instance support) ---
 
   async createActiveTask(
+    userId: string,
     taskId: string,
     migrationId: number,
     syncType: string,
@@ -391,8 +425,8 @@ export class Storage {
     progress: Record<string, unknown>
   ): Promise<void> {
     await this.sql`
-      INSERT INTO active_tasks (id, migration_id, sync_type, status, dry_run, progress_json)
-      VALUES (${taskId}, ${migrationId}, ${syncType}, 'starting', ${dryRun}, ${JSON.stringify(progress)})
+      INSERT INTO active_tasks (id, user_id, migration_id, sync_type, status, dry_run, progress_json)
+      VALUES (${taskId}, ${userId}, ${migrationId}, ${syncType}, 'starting', ${dryRun}, ${JSON.stringify(progress)})
     `;
   }
 
@@ -401,11 +435,13 @@ export class Storage {
     status: string,
     progress?: Record<string, unknown>,
     error?: string,
-    report?: Record<string, unknown>
+    report?: Record<string, unknown>,
+    chunkState?: { offset: number; totalItems: number; processedInChunk: number; hasMore: boolean }
   ): Promise<void> {
     const progressJson = progress ? JSON.stringify(progress) : null;
     const reportJson = report ? JSON.stringify(report) : null;
     const errorVal = error ?? null;
+    const chunkStateJson = chunkState ? JSON.stringify(chunkState) : null;
 
     await this.sql`
       UPDATE active_tasks
@@ -413,6 +449,7 @@ export class Storage {
           progress_json = COALESCE(${progressJson}, progress_json),
           error = COALESCE(${errorVal}, error),
           report_json = COALESCE(${reportJson}, report_json),
+          chunk_state_json = COALESCE(${chunkStateJson}, chunk_state_json),
           updated_at = NOW()
       WHERE id = ${taskId}
     `;
@@ -420,6 +457,7 @@ export class Storage {
 
   async getActiveTask(taskId: string): Promise<{
     id: string;
+    user_id: string;
     migration_id: number;
     sync_type: string;
     status: string;
@@ -427,14 +465,18 @@ export class Storage {
     progress: Record<string, unknown> | null;
     error: string | null;
     report: Record<string, unknown> | null;
+    chunkState: { offset: number; totalItems: number; processedInChunk: number; hasMore: boolean } | null;
   } | null> {
     const result = await this.sql`SELECT * FROM active_tasks WHERE id = ${taskId}`;
     const rows = this.toRows(result);
     if (rows.length === 0) return null;
 
     const row = rows[0];
+    const chunkStateRaw = row.chunk_state_json ? this.safeJsonParse(String(row.chunk_state_json), `active task ${taskId} chunk_state`) : null;
+
     return {
       id: String(row.id),
+      user_id: String(row.user_id),
       migration_id: Number(row.migration_id),
       sync_type: String(row.sync_type),
       status: String(row.status),
@@ -442,11 +484,13 @@ export class Storage {
       progress: row.progress_json ? this.safeJsonParse(String(row.progress_json), `active task ${taskId} progress`) : null,
       error: row.error ? String(row.error) : null,
       report: row.report_json ? this.safeJsonParse(String(row.report_json), `active task ${taskId} report`) : null,
+      chunkState: chunkStateRaw as { offset: number; totalItems: number; processedInChunk: number; hasMore: boolean } | null,
     };
   }
 
-  async getRunningTask(): Promise<{
+  async getRunningTask(userId: string): Promise<{
     id: string;
+    user_id: string;
     migration_id: number;
     sync_type: string;
     status: string;
@@ -455,7 +499,7 @@ export class Storage {
   } | null> {
     const result = await this.sql`
       SELECT * FROM active_tasks
-      WHERE status IN ('starting', 'running')
+      WHERE user_id = ${userId} AND status IN ('starting', 'running')
       ORDER BY created_at DESC
       LIMIT 1
     `;
@@ -466,6 +510,7 @@ export class Storage {
     const row = rows[0];
     return {
       id: String(row.id),
+      user_id: String(row.user_id),
       migration_id: Number(row.migration_id),
       sync_type: String(row.sync_type),
       status: String(row.status),
@@ -489,49 +534,49 @@ export class Storage {
 
   // --- Synced Track Tracking ---
 
-  async isTrackSynced(spotifyId: string, syncType: string): Promise<boolean> {
+  async isTrackSynced(userId: string, spotifyId: string, syncType: string): Promise<boolean> {
     const result = await this.sql`
-      SELECT 1 FROM synced_tracks WHERE spotify_id = ${spotifyId} AND sync_type = ${syncType}
+      SELECT 1 FROM synced_tracks WHERE user_id = ${userId} AND spotify_id = ${spotifyId} AND sync_type = ${syncType}
     `;
     return this.toRows(result).length > 0;
   }
 
-  async markTrackSynced(spotifyId: string, qobuzId: string, syncType: string): Promise<void> {
+  async markTrackSynced(userId: string, spotifyId: string, qobuzId: string, syncType: string): Promise<void> {
     await this.sql`
-      INSERT INTO synced_tracks (spotify_id, qobuz_id, sync_type)
-      VALUES (${spotifyId}, ${qobuzId}, ${syncType})
-      ON CONFLICT (spotify_id) DO UPDATE SET qobuz_id = ${qobuzId}, synced_at = NOW()
+      INSERT INTO synced_tracks (user_id, spotify_id, qobuz_id, sync_type)
+      VALUES (${userId}, ${spotifyId}, ${qobuzId}, ${syncType})
+      ON CONFLICT (user_id, spotify_id, sync_type) DO UPDATE SET qobuz_id = ${qobuzId}, synced_at = NOW()
     `;
   }
 
-  async getSyncedTrackIds(syncType: string): Promise<Set<string>> {
-    const result = await this.sql`SELECT spotify_id FROM synced_tracks WHERE sync_type = ${syncType}`;
+  async getSyncedTrackIds(userId: string, syncType: string): Promise<Set<string>> {
+    const result = await this.sql`SELECT spotify_id FROM synced_tracks WHERE user_id = ${userId} AND sync_type = ${syncType}`;
     const rows = this.toRows(result);
     return new Set(rows.map((r) => String(r.spotify_id)));
   }
 
-  async getSyncedCount(syncType: string): Promise<number> {
-    const result = await this.sql`SELECT COUNT(*) as count FROM synced_tracks WHERE sync_type = ${syncType}`;
+  async getSyncedCount(userId: string, syncType: string): Promise<number> {
+    const result = await this.sql`SELECT COUNT(*) as count FROM synced_tracks WHERE user_id = ${userId} AND sync_type = ${syncType}`;
     const rows = this.toRows(result);
     return parseInt(String(rows[0].count));
   }
 
-  async clearSyncedTracks(syncType: string): Promise<void> {
-    await this.sql`DELETE FROM synced_tracks WHERE sync_type = ${syncType}`;
+  async clearSyncedTracks(userId: string, syncType: string): Promise<void> {
+    await this.sql`DELETE FROM synced_tracks WHERE user_id = ${userId} AND sync_type = ${syncType}`;
   }
 
   // --- Sync Progress ---
 
-  async saveSyncProgress(syncType: string, lastOffset: number, totalTracks: number): Promise<void> {
+  async saveSyncProgress(userId: string, syncType: string, lastOffset: number, totalTracks: number): Promise<void> {
     await this.sql`
-      INSERT INTO sync_progress (sync_type, last_offset, total_tracks, updated_at)
-      VALUES (${syncType}, ${lastOffset}, ${totalTracks}, NOW())
-      ON CONFLICT (sync_type) DO UPDATE SET last_offset = ${lastOffset}, total_tracks = ${totalTracks}, updated_at = NOW()
+      INSERT INTO sync_progress (user_id, sync_type, last_offset, total_tracks, updated_at)
+      VALUES (${userId}, ${syncType}, ${lastOffset}, ${totalTracks}, NOW())
+      ON CONFLICT (user_id, sync_type) DO UPDATE SET last_offset = ${lastOffset}, total_tracks = ${totalTracks}, updated_at = NOW()
     `;
   }
 
-  async getSyncProgress(syncType: string): Promise<{ last_offset: number; total_tracks: number } | null> {
-    const result = await this.sql`SELECT last_offset, total_tracks FROM sync_progress WHERE sync_type = ${syncType}`;
+  async getSyncProgress(userId: string, syncType: string): Promise<{ last_offset: number; total_tracks: number } | null> {
+    const result = await this.sql`SELECT last_offset, total_tracks FROM sync_progress WHERE user_id = ${userId} AND sync_type = ${syncType}`;
     const rows = this.toRows(result);
     if (rows.length === 0) return null;
     return {
@@ -540,8 +585,8 @@ export class Storage {
     };
   }
 
-  async clearSyncProgress(syncType: string): Promise<void> {
-    await this.sql`DELETE FROM sync_progress WHERE sync_type = ${syncType}`;
+  async clearSyncProgress(userId: string, syncType: string): Promise<void> {
+    await this.sql`DELETE FROM sync_progress WHERE user_id = ${userId} AND sync_type = ${syncType}`;
   }
 
   async cleanupStaleTasks(): Promise<void> {
@@ -559,6 +604,7 @@ export class Storage {
   // --- Unmatched Tracks ---
 
   async saveUnmatchedTrack(
+    userId: string,
     spotifyId: string,
     title: string,
     artist: string,
@@ -569,15 +615,16 @@ export class Storage {
     const suggestionsJson = suggestions.length > 0 ? JSON.stringify(suggestions) : null;
 
     await this.sql`
-      INSERT INTO unmatched_tracks (spotify_id, title, artist, album, sync_type, suggestions_json, status)
-      VALUES (${spotifyId}, ${title}, ${artist}, ${album}, ${syncType}, ${suggestionsJson}, 'pending')
-      ON CONFLICT (spotify_id, sync_type) DO UPDATE SET
+      INSERT INTO unmatched_tracks (user_id, spotify_id, title, artist, album, sync_type, suggestions_json, status)
+      VALUES (${userId}, ${spotifyId}, ${title}, ${artist}, ${album}, ${syncType}, ${suggestionsJson}, 'pending')
+      ON CONFLICT (user_id, spotify_id, sync_type) DO UPDATE SET
         title = ${title}, artist = ${artist}, album = ${album},
         suggestions_json = ${suggestionsJson}, updated_at = NOW()
     `;
   }
 
   async getUnmatchedTracks(
+    userId: string,
     syncType?: string,
     status: string = 'pending',
     limit: number = 100,
@@ -587,13 +634,13 @@ export class Storage {
     if (syncType) {
       result = await this.sql`
         SELECT * FROM unmatched_tracks
-        WHERE sync_type = ${syncType} AND status = ${status}
+        WHERE user_id = ${userId} AND sync_type = ${syncType} AND status = ${status}
         ORDER BY created_at DESC LIMIT ${limit} OFFSET ${offset}
       `;
     } else {
       result = await this.sql`
         SELECT * FROM unmatched_tracks
-        WHERE status = ${status}
+        WHERE user_id = ${userId} AND status = ${status}
         ORDER BY created_at DESC LIMIT ${limit} OFFSET ${offset}
       `;
     }
@@ -611,41 +658,41 @@ export class Storage {
     });
   }
 
-  async getUnmatchedCount(syncType?: string, status: string = 'pending'): Promise<number> {
+  async getUnmatchedCount(userId: string, syncType?: string, status: string = 'pending'): Promise<number> {
     let result;
     if (syncType) {
       result = await this.sql`
         SELECT COUNT(*) as count FROM unmatched_tracks
-        WHERE sync_type = ${syncType} AND status = ${status}
+        WHERE user_id = ${userId} AND sync_type = ${syncType} AND status = ${status}
       `;
     } else {
       result = await this.sql`
-        SELECT COUNT(*) as count FROM unmatched_tracks WHERE status = ${status}
+        SELECT COUNT(*) as count FROM unmatched_tracks WHERE user_id = ${userId} AND status = ${status}
       `;
     }
     const rows = this.toRows(result);
     return parseInt(String(rows[0].count));
   }
 
-  async resolveUnmatchedTrack(spotifyId: string, syncType: string, qobuzId: string, status: string = 'resolved'): Promise<void> {
+  async resolveUnmatchedTrack(userId: string, spotifyId: string, syncType: string, qobuzId: string, status: string = 'resolved'): Promise<void> {
     await this.sql`
       UPDATE unmatched_tracks SET status = ${status}, resolved_qobuz_id = ${qobuzId}, updated_at = NOW()
-      WHERE spotify_id = ${spotifyId} AND sync_type = ${syncType}
+      WHERE user_id = ${userId} AND spotify_id = ${spotifyId} AND sync_type = ${syncType}
     `;
   }
 
-  async dismissUnmatchedTrack(spotifyId: string, syncType: string): Promise<void> {
+  async dismissUnmatchedTrack(userId: string, spotifyId: string, syncType: string): Promise<void> {
     await this.sql`
       UPDATE unmatched_tracks SET status = 'dismissed', updated_at = NOW()
-      WHERE spotify_id = ${spotifyId} AND sync_type = ${syncType}
+      WHERE user_id = ${userId} AND spotify_id = ${spotifyId} AND sync_type = ${syncType}
     `;
   }
 
-  async clearUnmatchedTracks(syncType?: string): Promise<void> {
+  async clearUnmatchedTracks(userId: string, syncType?: string): Promise<void> {
     if (syncType) {
-      await this.sql`DELETE FROM unmatched_tracks WHERE sync_type = ${syncType}`;
+      await this.sql`DELETE FROM unmatched_tracks WHERE user_id = ${userId} AND sync_type = ${syncType}`;
     } else {
-      await this.sql`DELETE FROM unmatched_tracks`;
+      await this.sql`DELETE FROM unmatched_tracks WHERE user_id = ${userId}`;
     }
   }
 
