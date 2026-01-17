@@ -65,6 +65,10 @@ export async function GET(request: NextRequest) {
   try {
     const client = new SpotifyClient(credentials);
     const stats = await client.getStats();
+    if (!stats.user_id) {
+      logger.error('Spotify profile returned no user ID');
+      redirect('/?error=credential_verification_failed');
+    }
     userId = stats.user_id;
   } catch (err) {
     const error = err instanceof Error ? err : new Error(String(err));

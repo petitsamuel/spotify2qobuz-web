@@ -33,6 +33,7 @@ export interface Migration {
 
 export interface SyncTask {
   id: string;
+  user_id: string;
   migration_id: number;
   status: string;
   progress_json: string | null;
@@ -220,6 +221,7 @@ export class Storage {
     // Create indexes for performance
     await this.sql`CREATE INDEX IF NOT EXISTS idx_credentials_user ON credentials(user_id)`;
     await this.sql`CREATE INDEX IF NOT EXISTS idx_migrations_user ON migrations(user_id)`;
+    await this.sql`CREATE INDEX IF NOT EXISTS idx_sync_tasks_user ON sync_tasks(user_id)`;
     await this.sql`CREATE INDEX IF NOT EXISTS idx_synced_tracks_user ON synced_tracks(user_id)`;
     await this.sql`CREATE INDEX IF NOT EXISTS idx_synced_tracks_sync_type ON synced_tracks(sync_type)`;
     await this.sql`CREATE INDEX IF NOT EXISTS idx_unmatched_user ON unmatched_tracks(user_id)`;
