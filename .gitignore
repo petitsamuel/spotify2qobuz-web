@@ -11,6 +11,7 @@ downloads/
 eggs/
 .eggs/
 lib/
+!ts/next/src/lib/
 lib64/
 parts/
 sdist/
@@ -47,6 +48,7 @@ credentials.md
 credentials*.md
 .env
 *.env
+!.env.example
 *.pem
 *.key
 
