@@ -519,24 +519,14 @@ export class TrackMatcher {
     artistScores.push(primaryScore);
 
     // Cross-match all Spotify artists with candidate featured artists
+    // Note: allSpotifyArtists already includes all artists from the API,
+    // so featured artists parsed from the string are covered here
     const allCandidateArtists = [candidateParsed.primary, ...candidateParsed.featured];
     for (const sArtist of allSpotifyArtists) {
       for (const cArtist of allCandidateArtists) {
         const crossScore = bestFuzzyScore(normalize(sArtist), normalize(cArtist));
         if (crossScore > 80) {
           artistScores.push(crossScore);
-        }
-      }
-    }
-
-    // Check if any featured artist from the combined artist string matches
-    if (spotifyParsed.featured.length > 0) {
-      for (const sArtist of spotifyParsed.featured) {
-        for (const cArtist of allCandidateArtists) {
-          const crossScore = bestFuzzyScore(normalize(sArtist), normalize(cArtist));
-          if (crossScore > 80) {
-            artistScores.push(crossScore);
-          }
         }
       }
     }
