@@ -1,0 +1,12 @@
+{
+  "framework": "nextjs",
+  "regions": ["iad1"],
+  "functions": {
+    "src/app/api/sync/progress/[taskId]/route.ts": {
+      "maxDuration": 60
+    },
+    "src/app/api/sync/start/route.ts": {
+      "maxDuration": 300
+    }
+  }
+}

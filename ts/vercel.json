@@ -1,0 +1,33 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "buildCommand": "bun install",
+  "installCommand": "bun install",
+  "framework": null,
+  "outputDirectory": ".",
+  "builds": [
+    {
+      "src": "ts/src/index.ts",
+      "use": "@vercel/bun"
+    },
+    {
+      "src": "static/**",
+      "use": "@vercel/static"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/static/(.*)",
+      "dest": "/static/$1"
+    },
+    {
+      "src": "/(.*)",
+      "dest": "/ts/src/index.ts"
+    }
+  ],
+  "env": {
+    "SPOTIFY_CLIENT_ID": "@spotify-client-id",
+    "SPOTIFY_CLIENT_SECRET": "@spotify-client-secret",
+    "ENCRYPTION_KEY": "@encryption-key",
+    "DATABASE_URL": "@database-url"
+  }
+}

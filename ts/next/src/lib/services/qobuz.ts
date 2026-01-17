@@ -1,0 +1,840 @@
+/**
+ * Qobuz API client using token-based authentication.
+ *
+ * PR Review fixes applied:
+ * - addFavoriteTrack/Album/Batch now throws QobuzApiError instead of returning false
+ * - getFavoritesCount now throws on error instead of returning -1
+ * - Better error handling throughout
+ */
+
+import { logger } from '../logger';
+import { QobuzApiError } from '../types';
+
+export interface QobuzTrack {
+  id: number;
+  title: string;
+  artist: string;
+  album: string;
+  duration: number;
+  isrc?: string;
+}
+
+export interface QobuzAlbum {
+  id: string;
+  title: string;
+  artist: string;
+  release_year: string | null;
+  tracks_count: number;
+  upc?: string;
+}
+
+export interface QobuzPlaylist {
+  id: string;
+  name: string;
+  tracks_count: number;
+}
+
+const QOBUZ_API_BASE = 'https://www.qobuz.com/api.json/0.2';
+const QOBUZ_APP_ID = process.env.QOBUZ_APP_ID || '798273057';
+
+// Rate limiting constants
+const INITIAL_DELAY_MS = 50;
+const MAX_DELAY_MS = 5000;
+const SPEEDUP_THRESHOLD = 10;
+const SPEEDUP_FACTOR = 0.8;
+
+/**
+ * Adaptive rate limiter that slows down when rate limited.
+ */
+class AdaptiveRateLimiter {
+  private delay: number;
+  private initialDelay: number;
+  private maxDelay: number;
+  private consecutiveSuccesses: number = 0;
+  private rateLimitedCount: number = 0;
+
+  constructor(initialDelay: number = INITIAL_DELAY_MS, maxDelay: number = MAX_DELAY_MS) {
+    this.delay = initialDelay;
+    this.initialDelay = initialDelay;
+    this.maxDelay = maxDelay;
+  }
+
+  async wait(): Promise<void> {
+    if (this.delay > 0) {
+      await new Promise(resolve => setTimeout(resolve, this.delay));
+    }
+  }
+
+  onSuccess(): void {
+    this.consecutiveSuccesses++;
+    if (this.consecutiveSuccesses >= SPEEDUP_THRESHOLD && this.delay > this.initialDelay) {
+      this.delay = Math.max(this.initialDelay, this.delay * SPEEDUP_FACTOR);
+      this.consecutiveSuccesses = 0;
+      logger.debug(`Rate limiter: speeding up to ${this.delay.toFixed(0)}ms delay`);
+    }
+  }
+
+  onRateLimit(): void {
+    this.consecutiveSuccesses = 0;
+    this.rateLimitedCount++;
+    this.delay = Math.min(this.maxDelay, this.delay * 2);
+    logger.warn(`Rate limited! Slowing down to ${this.delay.toFixed(0)}ms delay`);
+  }
+
+  getStats(): { currentDelay: number; rateLimitedCount: number } {
+    return {
+      currentDelay: this.delay,
+      rateLimitedCount: this.rateLimitedCount,
+    };
+  }
+}
+
+export class QobuzClient {
+  private userAuthToken: string;
+  private userId: number | null = null;
+  private userName: string | null = null;
+  private rateLimiter: AdaptiveRateLimiter;
+
+  constructor(userAuthToken: string) {
+    this.userAuthToken = userAuthToken;
+    this.rateLimiter = new AdaptiveRateLimiter();
+  }
+
+  private get headers(): HeadersInit {
+    return {
+      'X-App-Id': QOBUZ_APP_ID,
+      'X-User-Auth-Token': this.userAuthToken,
+      'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      'Origin': 'https://play.qobuz.com',
+      'Referer': 'https://play.qobuz.com/',
+    };
+  }
+
+  /**
+   * Validate the session token by fetching user favorites.
+   */
+  async authenticate(): Promise<void> {
+    try {
+      const url = new URL(`${QOBUZ_API_BASE}/favorite/getUserFavorites`);
+      url.searchParams.set('type', 'albums');
+      url.searchParams.set('limit', '1');
+
+      const response = await fetch(url.toString(), {
+        headers: this.headers,
+        signal: AbortSignal.timeout(10000),
+      });
+
+      if (response.status === 401 || response.status === 400) {
+        logger.error(`Token validation failed with status ${response.status}`);
+        logger.info('Your token may be expired. Please get a fresh one from:');
+        logger.info('https://play.qobuz.com -> DevTools -> Application -> Cookies -> qobuz.com');
+        throw new QobuzApiError(`Invalid or expired Qobuz token`, response.status, 'authenticate');
+      }
+
+      const data = await response.json();
+
+      if (data.user?.id) {
+        this.userId = data.user.id;
+        this.userName = data.user.display_name || 'Qobuz User';
+      } else {
+        this.userId = 1;
+        this.userName = 'Qobuz User';
+      }
+
+      logger.info('Authenticated with Qobuz successfully');
+    } catch (error) {
+      if (error instanceof QobuzApiError) {
+        throw error;
+      }
+      logger.error(`Network error during token validation: ${error}`);
+      throw new QobuzApiError(`Qobuz authentication failed: ${error}`, undefined, 'authenticate');
+    }
+  }
+
+  /**
+   * Make authenticated request to Qobuz API with retry and rate limiting.
+   */
+  private async request<T>(
+    endpoint: string,
+    params: Record<string, string | number> = {},
+    method: 'GET' | 'POST' = 'GET',
+    maxRetries: number = 3
+  ): Promise<T> {
+    const url = new URL(`${QOBUZ_API_BASE}/${endpoint}`);
+
+    if (method === 'GET') {
+      for (const [key, value] of Object.entries(params)) {
+        url.searchParams.set(key, String(value));
+      }
+    }
+
+    let lastError: Error | null = null;
+    let delay = 1000;
+
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        await this.rateLimiter.wait();
+
+        const response = await fetch(url.toString(), {
+          method,
+          headers: this.headers,
+          ...(method === 'POST' && {
+            body: new URLSearchParams(
+              Object.entries(params).map(([k, v]) => [k, String(v)])
+            ),
+          }),
+          signal: AbortSignal.timeout(15000),
+        });
+
+        if (response.status === 429) {
+          this.rateLimiter.onRateLimit();
+          const retryAfter = parseInt(response.headers.get('Retry-After') || String(delay / 1000 * 2));
+          logger.warn(`Rate limited on ${endpoint}. Waiting ${retryAfter}s...`);
+          await new Promise(resolve => setTimeout(resolve, retryAfter * 1000));
+          delay = retryAfter * 1000;
+          continue;
+        }
+
+        if (!response.ok) {
+          if (response.status >= 400 && response.status < 500) {
+            const text = await response.text();
+            logger.error(`Client error on ${endpoint}: ${response.status}`);
+            logger.error(`Response: ${text}`);
+            throw new QobuzApiError(`Qobuz API error: ${response.status}`, response.status, endpoint);
+          }
+
+          // Server error - retry if we have attempts left
+          if (attempt < maxRetries) {
+            logger.warn(`Server error on ${endpoint} (attempt ${attempt + 1}): ${response.status}`);
+            await new Promise(resolve => setTimeout(resolve, delay));
+            delay *= 2;
+            continue;
+          }
+
+          throw new QobuzApiError(`Qobuz API server error: ${response.status}`, response.status, endpoint);
+        }
+
+        this.rateLimiter.onSuccess();
+        return await response.json();
+      } catch (error) {
+        if (error instanceof QobuzApiError) {
+          throw error;
+        }
+        lastError = error as Error;
+        if (attempt < maxRetries) {
+          logger.warn(`Request failed for ${endpoint} (attempt ${attempt + 1}): ${error}`);
+          await new Promise(resolve => setTimeout(resolve, delay));
+          delay *= 2;
+        }
+      }
+    }
+
+    logger.error(`Qobuz API request failed for ${endpoint} after ${maxRetries + 1} attempts`);
+    throw new QobuzApiError(`Qobuz API request failed: ${lastError?.message}`, undefined, endpoint);
+  }
+
+  /**
+   * Search for a track by ISRC code with fallback strategies.
+   */
+  async searchByIsrc(
+    isrc: string,
+    titleHint?: string,
+    artistHint?: string
+  ): Promise<QobuzTrack | null> {
+    // Strategy 1: Direct ISRC search
+    const data = await this.request<{
+      tracks?: { items?: Array<{
+        id: number;
+        title: string;
+        performer: { name: string };
+        album: { title: string };
+        duration: number;
+        isrc?: string;
+      }> };
+    }>('track/search', { query: isrc, limit: 25 });
+
+    if (data.tracks?.items) {
+      for (const item of data.tracks.items) {
+        if (item.isrc?.toUpperCase() === isrc.toUpperCase()) {
+          return {
+            id: item.id,
+            title: item.title,
+            artist: item.performer.name,
+            album: item.album.title,
+            duration: item.duration * 1000,
+            isrc: item.isrc,
+          };
+        }
+      }
+    }
+
+    // Strategy 2: Search by metadata and verify ISRC
+    if (titleHint && artistHint) {
+      const metadataData = await this.request<{
+        tracks?: { items?: Array<{
+          id: number;
+          title: string;
+          performer: { name: string };
+          album: { title: string };
+          duration: number;
+          isrc?: string;
+        }> };
+      }>('track/search', { query: `${titleHint} ${artistHint}`, limit: 15 });
+
+      if (metadataData.tracks?.items) {
+        for (const item of metadataData.tracks.items) {
+          if (item.isrc?.toUpperCase() === isrc.toUpperCase()) {
+            return {
+              id: item.id,
+              title: item.title,
+              artist: item.performer.name,
+              album: item.album.title,
+              duration: item.duration * 1000,
+            };
+          }
+        }
+      }
+    }
+
+    logger.debug(`No exact ISRC match found for: ${isrc}`);
+    return null;
+  }
+
+  /**
+   * Search for a track by metadata (title, artist, duration).
+   */
+  async searchByMetadata(title: string, artist: string): Promise<QobuzTrack | null> {
+    const query = `${title} ${artist}`;
+    const data = await this.request<{
+      tracks?: { total?: number; items?: Array<{
+        id: number;
+        title: string;
+        performer: { name: string };
+        album: { title: string };
+        duration: number;
+      }> };
+    }>('track/search', { query, limit: 10 });
+
+    if (!data.tracks?.total || data.tracks.total === 0) {
+      logger.debug(`No tracks found for query: ${query}`);
+      return null;
+    }
+
+    const items = data.tracks.items;
+    if (items && items.length > 0) {
+      const item = items[0];
+      return {
+        id: item.id,
+        title: item.title,
+        artist: item.performer.name,
+        album: item.album.title,
+        duration: item.duration * 1000,
+      };
+    }
+
+    return null;
+  }
+
+  /**
+   * Search for candidates (multiple tracks) for fuzzy matching.
+   */
+  async searchCandidates(title: string, artist: string): Promise<QobuzTrack[]> {
+    const query = `${title} ${artist}`.trim();
+    if (!query) return [];
+
+    const data = await this.request<{
+      tracks?: { total?: number; items?: Array<{
+        id: number;
+        title: string;
+        performer: { name: string };
+        album: { title: string };
+        duration: number;
+      }> };
+    }>('track/search', { query, limit: 15 });
+
+    if (!data.tracks?.total || data.tracks.total === 0) {
+      return [];
+    }
+
+    return (data.tracks.items || []).map(item => ({
+      id: item.id,
+      title: item.title,
+      artist: item.performer.name,
+      album: item.album.title,
+      duration: item.duration * 1000,
+    }));
+  }
+
+  /**
+   * Create a new playlist.
+   * @throws QobuzApiError on failure
+   */
+  async createPlaylist(name: string, description: string = ''): Promise<string> {
+    const response = await fetch(`${QOBUZ_API_BASE}/playlist/create`, {
+      method: 'POST',
+      headers: {
+        ...this.headers,
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: new URLSearchParams({
+        name,
+        is_public: 'false',
+        is_collaborative: 'false',
+        ...(description && { description }),
+      }),
+      signal: AbortSignal.timeout(10000),
+    });
+
+    if (!response.ok) {
+      const text = await response.text();
+      throw new QobuzApiError(`Failed to create playlist ${name}: ${response.status} - ${text}`, response.status, 'playlist/create');
+    }
+
+    const result = await response.json();
+    const playlistId = String(result.id);
+    logger.info(`Created Qobuz playlist: ${name} (ID: ${playlistId})`);
+    return playlistId;
+  }
+
+  /**
+   * Add a track to a playlist.
+   * @throws QobuzApiError on failure
+   */
+  async addTrack(playlistId: string, trackId: number): Promise<void> {
+    const response = await fetch(`${QOBUZ_API_BASE}/playlist/addTracks`, {
+      method: 'POST',
+      headers: {
+        ...this.headers,
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: new URLSearchParams({
+        playlist_id: playlistId,
+        track_ids: String(trackId),
+      }),
+      signal: AbortSignal.timeout(10000),
+    });
+
+    await new Promise(resolve => setTimeout(resolve, 100)); // Rate limit prevention
+
+    if (!response.ok) {
+      throw new QobuzApiError(`Failed to add track ${trackId} to playlist ${playlistId}: ${response.status}`, response.status, 'playlist/addTracks');
+    }
+
+    logger.debug(`Added track ${trackId} to playlist ${playlistId}`);
+  }
+
+  /**
+   * Get all user playlists.
+   * @throws QobuzApiError on failure
+   */
+  async listUserPlaylists(): Promise<QobuzPlaylist[]> {
+    const data = await this.request<{
+      playlists?: { items?: Array<{
+        id: number;
+        name: string;
+        tracks_count?: number;
+      }> };
+    }>('playlist/getUserPlaylists', { limit: 500 });
+
+    const playlists: QobuzPlaylist[] = [];
+    if (data.playlists?.items) {
+      for (const item of data.playlists.items) {
+        playlists.push({
+          id: String(item.id),
+          name: item.name,
+          tracks_count: item.tracks_count || 0,
+        });
+      }
+    }
+
+    logger.info(`Found ${playlists.length} Qobuz playlists`);
+    return playlists;
+  }
+
+  /**
+   * Find a playlist by exact name match.
+   */
+  async findPlaylistByName(name: string): Promise<QobuzPlaylist | null> {
+    const playlists = await this.listUserPlaylists();
+    const found = playlists.find(p => p.name === name);
+    if (found) {
+      logger.debug(`Found existing playlist: ${name} (ID: ${found.id})`);
+    }
+    return found || null;
+  }
+
+  /**
+   * Get all track IDs in a playlist.
+   * @throws QobuzApiError on failure
+   */
+  async getPlaylistTracks(playlistId: string): Promise<number[]> {
+    const trackIds: number[] = [];
+    let offset = 0;
+    const limit = 500;
+
+    while (true) {
+      const data = await this.request<{
+        tracks?: {
+          items?: Array<{ id: number }>;
+          total?: number;
+        };
+      }>('playlist/get', { playlist_id: playlistId, extra: 'tracks', limit, offset });
+
+      if (!data.tracks) break;
+
+      const items = data.tracks.items || [];
+      if (items.length === 0) break;
+
+      trackIds.push(...items.map(t => t.id));
+
+      const total = data.tracks.total || 0;
+      if (trackIds.length >= total) break;
+
+      offset += limit;
+    }
+
+    logger.debug(`Found ${trackIds.length} tracks in playlist ${playlistId}`);
+    return trackIds;
+  }
+
+  /**
+   * Get favorite track IDs.
+   * @throws QobuzApiError on failure
+   */
+  async getFavoriteTracks(limit: number = 5000): Promise<number[]> {
+    const response = await fetch(
+      `${QOBUZ_API_BASE}/favorite/getUserFavorites?type=tracks&limit=${limit}&offset=0`,
+      { headers: this.headers, signal: AbortSignal.timeout(30000) }
+    );
+
+    if (!response.ok) {
+      throw new QobuzApiError(`Failed to get favorite tracks: HTTP ${response.status}`, response.status, 'favorite/getUserFavorites');
+    }
+
+    const data = await response.json();
+    const trackIds: number[] = [];
+
+    if (data.tracks?.items) {
+      for (const item of data.tracks.items) {
+        if (item.id) trackIds.push(item.id);
+      }
+    }
+
+    logger.info(`Retrieved ${trackIds.length} favorite tracks from Qobuz`);
+    return trackIds;
+  }
+
+  /**
+   * Get favorites count.
+   * @throws QobuzApiError on error
+   */
+  async getFavoritesCount(): Promise<number> {
+    const response = await fetch(
+      `${QOBUZ_API_BASE}/favorite/getUserFavorites?type=tracks&limit=1&offset=0`,
+      { headers: this.headers, signal: AbortSignal.timeout(10000) }
+    );
+
+    if (!response.ok) {
+      throw new QobuzApiError(`Failed to get favorites count: HTTP ${response.status}`, response.status, 'favorite/getUserFavorites');
+    }
+
+    const data = await response.json();
+    return data.tracks?.total || 0;
+  }
+
+  /**
+   * Get favorite tracks with their ISRCs for pre-matching.
+   * @throws QobuzApiError on failure
+   */
+  async getFavoriteTracksWithIsrc(limit: number = 5000): Promise<Map<string, number>> {
+    const response = await fetch(
+      `${QOBUZ_API_BASE}/favorite/getUserFavorites?type=tracks&limit=${limit}&offset=0`,
+      { headers: this.headers, signal: AbortSignal.timeout(60000) }
+    );
+
+    if (!response.ok) {
+      throw new QobuzApiError(`Failed to fetch Qobuz favorites: HTTP ${response.status}`, response.status, 'favorite/getUserFavorites');
+    }
+
+    const data = await response.json();
+    const isrcMap = new Map<string, number>();
+
+    if (data.tracks?.items) {
+      for (const item of data.tracks.items) {
+        if (item.isrc && item.id) {
+          isrcMap.set(item.isrc, item.id);
+        }
+      }
+    }
+
+    logger.info(`Retrieved ${isrcMap.size} favorite tracks with ISRCs from Qobuz`);
+    return isrcMap;
+  }
+
+  /**
+   * Add a track to favorites.
+   * @throws QobuzApiError on failure (does not return false)
+   */
+  async addFavoriteTrack(trackId: number): Promise<void> {
+    const response = await fetch(
+      `${QOBUZ_API_BASE}/favorite/create?track_ids=${trackId}`,
+      { method: 'POST', headers: this.headers, signal: AbortSignal.timeout(10000) }
+    );
+
+    // 400 = already favorited, which is fine
+    if (response.status === 400) {
+      logger.debug(`Track ${trackId} is already favorited`);
+      return;
+    }
+
+    if (!response.ok) {
+      throw new QobuzApiError(`Failed to add track ${trackId} to favorites: ${response.status}`, response.status, 'favorite/create');
+    }
+
+    logger.debug(`Added track ${trackId} to favorites`);
+  }
+
+  /**
+   * Add multiple tracks to favorites in batch.
+   * @throws QobuzApiError on failure (does not return false)
+   */
+  async addFavoriteTracksBatch(trackIds: number[]): Promise<void> {
+    if (trackIds.length === 0) return;
+
+    const response = await fetch(
+      `${QOBUZ_API_BASE}/favorite/create?track_ids=${trackIds.join(',')}`,
+      { method: 'POST', headers: this.headers, signal: AbortSignal.timeout(30000) }
+    );
+
+    if (response.status === 400) {
+      logger.debug('Some tracks already favorited');
+      return;
+    }
+
+    if (!response.ok) {
+      throw new QobuzApiError(`Failed to batch add favorites: ${response.status}`, response.status, 'favorite/create');
+    }
+
+    logger.debug(`Added ${trackIds.length} tracks to favorites in batch`);
+  }
+
+  // --- Album Methods ---
+
+  /**
+   * Search for albums by title and artist.
+   */
+  async searchAlbum(title: string, artist: string): Promise<QobuzAlbum[]> {
+    const query = `${title} ${artist}`;
+    const data = await this.request<{
+      albums?: { items?: Array<{
+        id: string;
+        title: string;
+        artist?: { name: string };
+        released_at?: number;
+        tracks_count?: number;
+        upc?: string;
+      }> };
+    }>('album/search', { query, limit: 10 });
+
+    const albums: QobuzAlbum[] = [];
+    if (data.albums?.items) {
+      for (const item of data.albums.items) {
+        const releasedAt = item.released_at ? String(item.released_at).slice(0, 4) : null;
+        albums.push({
+          id: item.id,
+          title: item.title || '',
+          artist: item.artist?.name || 'Unknown',
+          release_year: releasedAt,
+          tracks_count: item.tracks_count || 0,
+          upc: item.upc,
+        });
+      }
+    }
+
+    logger.debug(`Found ${albums.length} albums for query: ${query}`);
+    return albums;
+  }
+
+  /**
+   * Search for an album by UPC code.
+   */
+  async searchAlbumByUpc(upc: string): Promise<QobuzAlbum | null> {
+    const data = await this.request<{
+      albums?: { items?: Array<{
+        id: string;
+        title: string;
+        artist?: { name: string };
+        released_at?: number;
+        tracks_count?: number;
+        upc?: string;
+      }> };
+    }>('album/search', { query: upc, limit: 5 });
+
+    if (data.albums?.items) {
+      for (const item of data.albums.items) {
+        if (item.upc === upc) {
+          const releasedAt = item.released_at ? String(item.released_at).slice(0, 4) : null;
+          return {
+            id: item.id,
+            title: item.title || '',
+            artist: item.artist?.name || 'Unknown',
+            release_year: releasedAt,
+            tracks_count: item.tracks_count || 0,
+            upc: item.upc,
+          };
+        }
+      }
+    }
+
+    logger.debug(`No exact UPC match found for: ${upc}`);
+    return null;
+  }
+
+  /**
+   * Get favorite album IDs.
+   * @throws QobuzApiError on failure
+   */
+  async getFavoriteAlbums(limit: number = 5000): Promise<string[]> {
+    const response = await fetch(
+      `${QOBUZ_API_BASE}/favorite/getUserFavorites?type=albums&limit=${limit}&offset=0`,
+      { headers: this.headers, signal: AbortSignal.timeout(30000) }
+    );
+
+    if (!response.ok) {
+      throw new QobuzApiError(`Failed to fetch Qobuz favorite albums: HTTP ${response.status}`, response.status, 'favorite/getUserFavorites');
+    }
+
+    const data = await response.json();
+    const albumIds: string[] = [];
+
+    if (data.albums?.items) {
+      for (const item of data.albums.items) {
+        if (item.id) albumIds.push(String(item.id));
+      }
+    }
+
+    logger.info(`Retrieved ${albumIds.length} favorite albums from Qobuz`);
+    return albumIds;
+  }
+
+  /**
+   * Get favorite albums count.
+   * @throws QobuzApiError on error
+   */
+  async getFavoriteAlbumsCount(): Promise<number> {
+    const response = await fetch(
+      `${QOBUZ_API_BASE}/favorite/getUserFavorites?type=albums&limit=1&offset=0`,
+      { headers: this.headers, signal: AbortSignal.timeout(10000) }
+    );
+
+    if (!response.ok) {
+      throw new QobuzApiError(`Failed to get favorite albums count: HTTP ${response.status}`, response.status, 'favorite/getUserFavorites');
+    }
+
+    const data = await response.json();
+    return data.albums?.total || 0;
+  }
+
+  /**
+   * Get favorite albums with UPCs for pre-matching.
+   * @throws QobuzApiError on failure
+   */
+  async getFavoriteAlbumsWithUpc(limit: number = 5000): Promise<Map<string, string>> {
+    const response = await fetch(
+      `${QOBUZ_API_BASE}/favorite/getUserFavorites?type=albums&limit=${limit}&offset=0`,
+      { headers: this.headers, signal: AbortSignal.timeout(60000) }
+    );
+
+    if (!response.ok) {
+      throw new QobuzApiError(`Failed to fetch Qobuz favorite albums: HTTP ${response.status}`, response.status, 'favorite/getUserFavorites');
+    }
+
+    const data = await response.json();
+    const upcMap = new Map<string, string>();
+
+    if (data.albums?.items) {
+      for (const item of data.albums.items) {
+        if (item.upc && item.id) {
+          upcMap.set(item.upc, String(item.id));
+        }
+      }
+    }
+
+    logger.info(`Retrieved ${upcMap.size} favorite albums with UPCs from Qobuz`);
+    return upcMap;
+  }
+
+  /**
+   * Add an album to favorites.
+   * @throws QobuzApiError on failure (does not return false)
+   */
+  async addFavoriteAlbum(albumId: string | number): Promise<void> {
+    const response = await fetch(
+      `${QOBUZ_API_BASE}/favorite/create?album_ids=${albumId}`,
+      { method: 'POST', headers: this.headers, signal: AbortSignal.timeout(10000) }
+    );
+
+    if (response.status === 400) {
+      logger.debug(`Album ${albumId} is already favorited`);
+      return;
+    }
+
+    if (!response.ok) {
+      throw new QobuzApiError(`Failed to add album ${albumId} to favorites: ${response.status}`, response.status, 'favorite/create');
+    }
+
+    logger.debug(`Added album ${albumId} to favorites`);
+  }
+
+  /**
+   * Add multiple albums to favorites in batch.
+   * @throws QobuzApiError on failure (does not return false)
+   */
+  async addFavoriteAlbumsBatch(albumIds: (string | number)[]): Promise<void> {
+    if (albumIds.length === 0) return;
+
+    const response = await fetch(
+      `${QOBUZ_API_BASE}/favorite/create?album_ids=${albumIds.join(',')}`,
+      { method: 'POST', headers: this.headers, signal: AbortSignal.timeout(30000) }
+    );
+
+    if (response.status === 400) {
+      logger.debug('Some albums already favorited');
+      return;
+    }
+
+    if (!response.ok) {
+      throw new QobuzApiError(`Failed to batch add favorite albums: ${response.status}`, response.status, 'favorite/create');
+    }
+
+    logger.debug(`Added ${albumIds.length} albums to favorites in batch`);
+  }
+
+  /**
+   * Get stats for the Qobuz library.
+   * Note: Individual stat failures are propagated so callers can handle them.
+   */
+  async getStats(): Promise<{
+    playlists: number;
+    fromSpotify: number;
+    favorites: number;
+    favoriteAlbums: number;
+  }> {
+    const [playlists, favoritesCount, favoriteAlbumsCount] = await Promise.all([
+      this.listUserPlaylists(),
+      this.getFavoritesCount(),
+      this.getFavoriteAlbumsCount(),
+    ]);
+
+    const fromSpotify = playlists.filter(
+      p => p.name.includes('(from Spotify)') || p.name.includes('[Spotify]')
+    ).length;
+
+    return {
+      playlists: playlists.length,
+      fromSpotify,
+      favorites: favoritesCount,
+      favoriteAlbums: favoriteAlbumsCount,
+    };
+  }
+}
