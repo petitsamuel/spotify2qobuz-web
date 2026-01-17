@@ -22,7 +22,7 @@ cp .env.example .env
 
 Edit `.env` with your credentials:
 
-```
+```dotenv
 DATABASE_URL=postgresql://user:password@host:5432/database?sslmode=require
 ENCRYPTION_KEY=your-32-byte-hex-encryption-key-here
 SPOTIFY_CLIENT_ID=your-spotify-client-id
@@ -30,7 +30,7 @@ SPOTIFY_CLIENT_SECRET=your-spotify-client-secret
 ```
 
 **Spotify App Setup:**
-1. Go to https://developer.spotify.com/dashboard
+1. Go to the [Spotify Developer Dashboard](https://developer.spotify.com/dashboard)
 2. Click "Create App"
 3. Set redirect URI to your deployment URL + `/api/auth/spotify/callback`
 4. Copy your Client ID and Client Secret
@@ -41,14 +41,14 @@ SPOTIFY_CLIENT_SECRET=your-spotify-client-secret
 npm run dev
 ```
 
-Open http://localhost:3000
+Open [http://localhost:3000](http://localhost:3000)
 
 ### 4. Connect your accounts
 
 **Spotify:** Click "Connect Spotify" and authorize the app.
 
 **Qobuz:** Click "Connect Qobuz" and follow the instructions to get your token:
-1. Open https://play.qobuz.com and log in
+1. Open [Qobuz Web Player](https://play.qobuz.com) and log in
 2. Open DevTools (F12) → Network tab
 3. Play any song or click around
 4. Filter by `api.json` and click any request
