@@ -13,7 +13,7 @@ import { logger } from '@/lib/logger';
 /**
  * Create a redirect response with optional user ID cookie.
  */
-function createRedirect(url: string, userId?: string): NextResponse {
+function createRedirect(url: URL, userId?: string): NextResponse {
   const response = NextResponse.redirect(url);
 
   if (userId) {
@@ -40,17 +40,17 @@ export async function GET(request: NextRequest) {
 
   if (error) {
     logger.error(`Spotify OAuth error: ${error}`);
-    return createRedirect(`${baseUrl}/?error=spotify_auth_error`);
+    return createRedirect(new URL('/?error=spotify_auth_error', baseUrl));
   }
 
   if (!code || !state) {
-    return createRedirect(`${baseUrl}/?error=missing_oauth_params`);
+    return createRedirect(new URL('/?error=missing_oauth_params', baseUrl));
   }
 
   // Validate state from database
   const storedState = await storage.getOAuthState(state);
   if (!storedState) {
-    return createRedirect(`${baseUrl}/?error=invalid_state`);
+    return createRedirect(new URL('/?error=invalid_state', baseUrl));
   }
 
   // Delete used state
@@ -61,7 +61,7 @@ export async function GET(request: NextRequest) {
 
   if (!clientId || !clientSecret) {
     logger.error('Missing SPOTIFY_CLIENT_ID or SPOTIFY_CLIENT_SECRET');
-    return createRedirect(`${baseUrl}/?error=missing_spotify_config`);
+    return createRedirect(new URL('/?error=missing_spotify_config', baseUrl));
   }
 
   // Exchange code for credentials
@@ -79,7 +79,7 @@ export async function GET(request: NextRequest) {
       message: error.message,
       stack: error.stack,
     });
-    return createRedirect(`${baseUrl}/?error=token_exchange_failed`);
+    return createRedirect(new URL('/?error=token_exchange_failed', baseUrl));
   }
 
   // Verify credentials work and get user ID
@@ -89,7 +89,7 @@ export async function GET(request: NextRequest) {
     const stats = await client.getStats();
     if (!stats.user_id) {
       logger.error('Spotify profile returned no user ID');
-      return createRedirect(`${baseUrl}/?error=credential_verification_failed`);
+      return createRedirect(new URL('/?error=credential_verification_failed', baseUrl));
     }
     userId = stats.user_id;
   } catch (err) {
@@ -98,7 +98,7 @@ export async function GET(request: NextRequest) {
       message: error.message,
       stack: error.stack,
     });
-    return createRedirect(`${baseUrl}/?error=credential_verification_failed`);
+    return createRedirect(new URL('/?error=credential_verification_failed', baseUrl));
   }
 
   // Save credentials to database with user ID
@@ -110,9 +110,9 @@ export async function GET(request: NextRequest) {
       message: error.message,
       stack: error.stack,
     });
-    return createRedirect(`${baseUrl}/?error=credential_storage_failed`);
+    return createRedirect(new URL('/?error=credential_storage_failed', baseUrl));
   }
 
   logger.info(`Spotify connected successfully for user ${userId}`);
-  return createRedirect(`${baseUrl}/?spotify_connected=true`, userId);
+  return createRedirect(new URL('/?spotify_connected=true', baseUrl), userId);
 }
