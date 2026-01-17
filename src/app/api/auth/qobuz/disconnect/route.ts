@@ -1,19 +1,23 @@
 /**
  * Disconnect Qobuz route.
+ *
+ * Uses NextResponse.redirect() for proper HTTP redirect handling on mobile browsers.
  */
 
-import { redirect } from 'next/navigation';
-import { ensureDbInitialized, getCurrentUserId } from '@/lib/api-helpers';
+import { NextRequest, NextResponse } from 'next/server';
+import { ensureDbInitialized, getCurrentUserId, getBaseUrl } from '@/lib/api-helpers';
 import { logger } from '@/lib/logger';
 
-export async function POST() {
+export async function POST(request: NextRequest) {
+  const baseUrl = getBaseUrl(request);
   const userId = await getCurrentUserId();
+
   if (!userId) {
-    redirect('/?error=not_authenticated');
+    return NextResponse.redirect(new URL('/?error=not_authenticated', baseUrl));
   }
 
   const storage = await ensureDbInitialized();
   await storage.deleteCredentials(userId, 'qobuz');
   logger.info(`Qobuz disconnected for user ${userId}`);
-  redirect('/');
+  return NextResponse.redirect(new URL('/', baseUrl));
 }

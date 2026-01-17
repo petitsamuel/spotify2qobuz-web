@@ -1,15 +1,37 @@
 /**
  * Spotify OAuth callback route.
+ *
+ * Uses NextResponse.redirect() instead of next/navigation redirect()
+ * for proper HTTP redirect handling on mobile browsers.
  */
 
-import { redirect } from 'next/navigation';
-import { NextRequest } from 'next/server';
-import { ensureDbInitialized, setCurrentUserId } from '@/lib/api-helpers';
+import { NextRequest, NextResponse } from 'next/server';
+import { ensureDbInitialized, getBaseUrl, USER_ID_COOKIE } from '@/lib/api-helpers';
 import { SpotifyClient } from '@/lib/services/spotify';
 import { logger } from '@/lib/logger';
 
+/**
+ * Create a redirect response with optional user ID cookie.
+ */
+function createRedirect(url: URL, userId?: string): NextResponse {
+  const response = NextResponse.redirect(url);
+
+  if (userId) {
+    response.cookies.set(USER_ID_COOKIE, userId, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'lax',
+      maxAge: 60 * 60 * 24 * 30, // 30 days
+      path: '/',
+    });
+  }
+
+  return response;
+}
+
 export async function GET(request: NextRequest) {
   const storage = await ensureDbInitialized();
+  const baseUrl = getBaseUrl(request);
 
   const searchParams = request.nextUrl.searchParams;
   const code = searchParams.get('code');
@@ -18,17 +40,17 @@ export async function GET(request: NextRequest) {
 
   if (error) {
     logger.error(`Spotify OAuth error: ${error}`);
-    redirect('/?error=spotify_auth_error');
+    return createRedirect(new URL('/?error=spotify_auth_error', baseUrl));
   }
 
   if (!code || !state) {
-    redirect('/?error=missing_oauth_params');
+    return createRedirect(new URL('/?error=missing_oauth_params', baseUrl));
   }
 
   // Validate state from database
   const storedState = await storage.getOAuthState(state);
   if (!storedState) {
-    redirect('/?error=invalid_state');
+    return createRedirect(new URL('/?error=invalid_state', baseUrl));
   }
 
   // Delete used state
@@ -39,7 +61,7 @@ export async function GET(request: NextRequest) {
 
   if (!clientId || !clientSecret) {
     logger.error('Missing SPOTIFY_CLIENT_ID or SPOTIFY_CLIENT_SECRET');
-    redirect('/?error=missing_spotify_config');
+    return createRedirect(new URL('/?error=missing_spotify_config', baseUrl));
   }
 
   // Exchange code for credentials
@@ -57,7 +79,7 @@ export async function GET(request: NextRequest) {
       message: error.message,
       stack: error.stack,
     });
-    redirect('/?error=token_exchange_failed');
+    return createRedirect(new URL('/?error=token_exchange_failed', baseUrl));
   }
 
   // Verify credentials work and get user ID
@@ -67,7 +89,7 @@ export async function GET(request: NextRequest) {
     const stats = await client.getStats();
     if (!stats.user_id) {
       logger.error('Spotify profile returned no user ID');
-      redirect('/?error=credential_verification_failed');
+      return createRedirect(new URL('/?error=credential_verification_failed', baseUrl));
     }
     userId = stats.user_id;
   } catch (err) {
@@ -76,7 +98,7 @@ export async function GET(request: NextRequest) {
       message: error.message,
       stack: error.stack,
     });
-    redirect('/?error=credential_verification_failed');
+    return createRedirect(new URL('/?error=credential_verification_failed', baseUrl));
   }
 
   // Save credentials to database with user ID
@@ -88,12 +110,9 @@ export async function GET(request: NextRequest) {
       message: error.message,
       stack: error.stack,
     });
-    redirect('/?error=credential_storage_failed');
+    return createRedirect(new URL('/?error=credential_storage_failed', baseUrl));
   }
 
-  // Set user session cookie
-  await setCurrentUserId(userId);
-
   logger.info(`Spotify connected successfully for user ${userId}`);
-  redirect('/?spotify_connected=true');
+  return createRedirect(new URL('/?spotify_connected=true', baseUrl), userId);
 }
