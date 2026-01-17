@@ -42,33 +42,49 @@ export async function GET(request: NextRequest) {
     redirect('/?error=missing_spotify_config');
   }
 
-  // Exchange code and save credentials - capture any error to redirect after try/catch
-  let exchangeError: Error | null = null;
+  // Exchange code for credentials
+  let credentials;
   try {
-    const credentials = await SpotifyClient.exchangeCode(
+    credentials = await SpotifyClient.exchangeCode(
       code,
       clientId,
       clientSecret,
       storedState.redirect_uri
     );
-
-    // Verify the credentials work
-    const client = new SpotifyClient(credentials);
-    await client.getStats();
-
-    // Save credentials
-    await storage.saveCredentials('spotify', credentials as unknown as Record<string, unknown>);
-
-    logger.info('Spotify connected successfully');
   } catch (err) {
-    exchangeError = err instanceof Error ? err : new Error(String(err));
-  }
-
-  // Redirect outside try/catch to avoid catching NEXT_REDIRECT
-  if (exchangeError) {
-    logger.error(`Spotify token exchange failed: ${exchangeError}`);
+    const error = err instanceof Error ? err : new Error(String(err));
+    logger.error('Spotify token exchange failed', {
+      message: error.message,
+      stack: error.stack,
+    });
     redirect('/?error=token_exchange_failed');
   }
 
+  // Verify credentials work
+  try {
+    const client = new SpotifyClient(credentials);
+    await client.getStats();
+  } catch (err) {
+    const error = err instanceof Error ? err : new Error(String(err));
+    logger.error('Spotify credential verification failed', {
+      message: error.message,
+      stack: error.stack,
+    });
+    redirect('/?error=credential_verification_failed');
+  }
+
+  // Save credentials to database
+  try {
+    await storage.saveCredentials('spotify', credentials as unknown as Record<string, unknown>);
+  } catch (err) {
+    const error = err instanceof Error ? err : new Error(String(err));
+    logger.error('Failed to save Spotify credentials', {
+      message: error.message,
+      stack: error.stack,
+    });
+    redirect('/?error=credential_storage_failed');
+  }
+
+  logger.info('Spotify connected successfully');
   redirect('/?spotify_connected=true');
 }
