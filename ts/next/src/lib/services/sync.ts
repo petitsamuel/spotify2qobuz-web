@@ -58,8 +58,9 @@ const EDITION_KEYWORDS = [
   'motion picture', 'film score',
   // Format indicators
   'vinyl', 'cd', 'digital', 'streaming',
-  // Year indicators (standalone)
-  '\\d{4}',
+  // Note: Removed standalone '\\d{4}' as it's too broad and would strip
+  // legitimate album titles like "1989", "2001", "1984". Year-based editions
+  // are covered by specific patterns like 'remastered \\d{4}', '\\d{4} remaster'.
 ];
 
 // Build a mega-pattern that matches any edition keyword in () or []
