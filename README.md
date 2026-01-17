@@ -1,6 +1,6 @@
 # Spotify to Qobuz Migration
 
-Migrate your playlists and saved songs from Spotify to Qobuz with a web interface.
+Migrate your playlists and saved songs from Spotify to Qobuz with a modern web interface.
 
 ## Quick Start
 
@@ -9,34 +9,39 @@ Migrate your playlists and saved songs from Spotify to Qobuz with a web interfac
 ```bash
 git clone https://github.com/petitsamuel/spotify2qobuz-web.git
 cd spotify2qobuz-web
-pip install -r requirements.txt
+npm install
 ```
 
-### 2. Set up Spotify credentials
+### 2. Set up environment
 
-Create a Spotify app at https://developer.spotify.com/dashboard:
-1. Click "Create App"
-2. Set redirect URI to `http://127.0.0.1:8000/auth/spotify/callback`
-3. Copy your Client ID and Client Secret
+Copy the example environment file:
 
 ```bash
 cp .env.example .env
 ```
 
-Edit `.env`:
+Edit `.env` with your credentials:
+
 ```
-SPOTIFY_CLIENT_ID=your_client_id_here
-SPOTIFY_CLIENT_SECRET=your_client_secret_here
-SPOTIFY_REDIRECT_URI=http://127.0.0.1:8000/auth/spotify/callback
+DATABASE_URL=postgresql://user:password@host:5432/database?sslmode=require
+ENCRYPTION_KEY=your-32-byte-hex-encryption-key-here
+SPOTIFY_CLIENT_ID=your-spotify-client-id
+SPOTIFY_CLIENT_SECRET=your-spotify-client-secret
 ```
 
-### 3. Run the web server
+**Spotify App Setup:**
+1. Go to https://developer.spotify.com/dashboard
+2. Click "Create App"
+3. Set redirect URI to your deployment URL + `/api/auth/spotify/callback`
+4. Copy your Client ID and Client Secret
+
+### 3. Run the development server
 
 ```bash
-python run_web.py
+npm run dev
 ```
 
-Open http://127.0.0.1:8000
+Open http://localhost:3000
 
 ### 4. Connect your accounts
 
@@ -68,11 +73,21 @@ Watch the real-time progress and match rate as it syncs.
 
 ## Tech Stack
 
-- FastAPI + Jinja2
-- Tailwind CSS + Alpine.js
-- SQLite for storage
-- Spotipy for Spotify API
-- RapidFuzz for track matching
+- Next.js 16 + React 19
+- Tailwind CSS
+- Radix UI components
+- TanStack Query
+- Neon PostgreSQL (serverless)
+
+## Deployment
+
+Deploy to Vercel:
+
+```bash
+npm run build
+```
+
+Or use the Vercel CLI / dashboard for automatic deployments.
 
 ## License
 
