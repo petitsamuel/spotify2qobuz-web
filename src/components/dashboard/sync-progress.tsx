@@ -220,7 +220,7 @@ export function SyncProgress({ taskId, syncType, onComplete }: SyncProgressProps
       <CardContent className="space-y-4">
         {isActive && (
           <>
-            <Progress value={chunkState ? (chunkState.offset / chunkState.totalItems) * 100 : progress.percent_complete ?? 0} />
+            <Progress value={chunkState && chunkState.totalItems > 0 ? (chunkState.offset / chunkState.totalItems) * 100 : progress.percent_complete ?? 0} />
             {chunkState && chunkState.totalItems > 0 && (
               <div className="text-xs text-muted-foreground">
                 Overall: {chunkState.offset} / {chunkState.totalItems} items
