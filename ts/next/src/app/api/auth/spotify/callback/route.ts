@@ -42,6 +42,8 @@ export async function GET(request: NextRequest) {
     redirect('/?error=missing_spotify_config');
   }
 
+  // Exchange code and save credentials - capture any error to redirect after try/catch
+  let exchangeError: Error | null = null;
   try {
     const credentials = await SpotifyClient.exchangeCode(
       code,
@@ -58,9 +60,15 @@ export async function GET(request: NextRequest) {
     await storage.saveCredentials('spotify', credentials as unknown as Record<string, unknown>);
 
     logger.info('Spotify connected successfully');
-    redirect('/?spotify_connected=true');
   } catch (err) {
-    logger.error(`Spotify token exchange failed: ${err}`);
+    exchangeError = err instanceof Error ? err : new Error(String(err));
+  }
+
+  // Redirect outside try/catch to avoid catching NEXT_REDIRECT
+  if (exchangeError) {
+    logger.error(`Spotify token exchange failed: ${exchangeError}`);
     redirect('/?error=token_exchange_failed');
   }
+
+  redirect('/?spotify_connected=true');
 }
