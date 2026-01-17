@@ -20,6 +20,14 @@ const DURATION_TOLERANCE_MS = 10000;
 const MIN_COMBINED_SCORE = 78;
 const MIN_ARTIST_SCORE_FOR_SUGGESTION = 50;
 
+/**
+ * Normalize ISRC codes for comparison.
+ * ISRCs can appear with or without hyphens: USRC17607839 vs US-RC1-76-07839
+ */
+function normalizeIsrc(isrc: string): string {
+  return isrc.toUpperCase().replace(/[-\s]/g, '');
+}
+
 // Patterns for normalization
 const FEAT_PATTERN = /\s*[([](feat\.?|ft\.?|featuring|with|prod\.?|produced by)[^\])]*[\])]/gi;
 const FEAT_INLINE_PATTERN = /\s+(feat\.?|ft\.?|featuring|with)\s+.+$/gi;
@@ -135,8 +143,9 @@ function partialRatio(s1: string, s2: string): number {
 
 /**
  * Best fuzzy score using multiple algorithms.
+ * Exported for use in album matching.
  */
-function bestFuzzyScore(s1: string, s2: string): number {
+export function bestFuzzyScore(s1: string, s2: string): number {
   return Math.max(
     fuzzyRatio(s1, s2),
     tokenSortRatio(s1, s2),
@@ -291,6 +300,25 @@ export class TrackMatcher {
       spotifyTrack.title,
       spotifyTrack.artist
     );
+
+    // Check if any candidate has matching ISRC (cross-verification)
+    // This catches cases where ISRC search failed but fuzzy search found it
+    if (spotifyTrack.isrc) {
+      const normalizedSpotifyIsrc = normalizeIsrc(spotifyTrack.isrc);
+      for (const candidate of candidates) {
+        if (candidate.isrc && normalizeIsrc(candidate.isrc) === normalizedSpotifyIsrc) {
+          logger.info(
+            `ISRC cross-verified in fuzzy candidates: ${spotifyTrack.title} by ${spotifyTrack.artist} -> ` +
+            `${candidate.title} by ${candidate.artist}`
+          );
+          return [{
+            qobuzTrack: candidate,
+            matchType: 'isrc',
+            score: 100,
+          }, []];
+        }
+      }
+    }
 
     // Score all candidates
     const scoredCandidates = candidates.map(candidate => {
@@ -468,7 +496,18 @@ export class TrackMatcher {
     // Calculate artist scores - try multiple approaches
     const artistScores = [bestFuzzyScore(spotifyArtist, candidateArtist)];
 
-    // Extract and match featured artists separately
+    // Use allArtists if available for better collaboration matching
+    const allSpotifyArtists = spotifyTrack.allArtists?.length > 0
+      ? spotifyTrack.allArtists
+      : [spotifyTrack.artist];
+
+    // Match each Spotify artist against the Qobuz artist
+    for (const sArtist of allSpotifyArtists) {
+      const score = bestFuzzyScore(normalize(sArtist), candidateArtist);
+      artistScores.push(score);
+    }
+
+    // Extract and match featured artists from the artist string
     const spotifyParsed = extractFeaturedArtists(spotifyTrack.artist);
     const candidateParsed = extractFeaturedArtists(candidate.artist);
 
@@ -479,25 +518,25 @@ export class TrackMatcher {
     );
     artistScores.push(primaryScore);
 
-    // Check if any featured artist matches
-    if (spotifyParsed.featured.length > 0 || candidateParsed.featured.length > 0) {
-      const allSpotifyArtists = [spotifyParsed.primary, ...spotifyParsed.featured];
-      const allCandidateArtists = [candidateParsed.primary, ...candidateParsed.featured];
-
-      for (const sArtist of allSpotifyArtists) {
-        for (const cArtist of allCandidateArtists) {
-          const crossScore = bestFuzzyScore(normalize(sArtist), normalize(cArtist));
-          if (crossScore > 80) {
-            artistScores.push(crossScore);
-          }
+    // Cross-match all Spotify artists with candidate featured artists
+    // Note: allSpotifyArtists already includes all artists from the API,
+    // so featured artists parsed from the string are covered here
+    const allCandidateArtists = [candidateParsed.primary, ...candidateParsed.featured];
+    for (const sArtist of allSpotifyArtists) {
+      for (const cArtist of allCandidateArtists) {
+        const crossScore = bestFuzzyScore(normalize(sArtist), normalize(cArtist));
+        if (crossScore > 80) {
+          artistScores.push(crossScore);
         }
       }
     }
 
-    // Also check if artist appears in track title
-    const artistInTitle = partialRatio(spotifyArtist, candidateTitle);
-    if (artistInTitle > 70) {
-      artistScores.push(artistInTitle);
+    // Also check if any artist appears in track title
+    for (const sArtist of allSpotifyArtists) {
+      const artistInTitle = partialRatio(normalize(sArtist), candidateTitle);
+      if (artistInTitle > 70) {
+        artistScores.push(artistInTitle);
+      }
     }
 
     const artistScore = Math.max(...artistScores);

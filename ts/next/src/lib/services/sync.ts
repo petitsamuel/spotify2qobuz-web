@@ -9,36 +9,163 @@
 import { logger } from '../logger';
 import { SpotifyClient, SpotifyTrack, SpotifyAlbum } from './spotify';
 import { QobuzClient, QobuzAlbum } from './qobuz';
-import { TrackMatcher, MatchResult, Suggestion, fuzzyRatio } from './matcher';
+import { TrackMatcher, Suggestion, bestFuzzyScore } from './matcher';
 import type { SyncProgress, SyncReport, AlbumSyncReport, MissingTrack } from '../types';
 
-// Edition patterns to strip when searching for base albums
-const EDITION_PATTERNS = [
-  /\s*\(Deluxe\s*Edition?\)/i,
-  /\s*\(Super\s*Deluxe\)/i,
-  /\s*\(Deluxe\)/i,
-  /\s*\(Expanded\s*Edition?\)/i,
-  /\s*\(Special\s*Edition?\)/i,
-  /\s*\(Anniversary\s*Edition?\)/i,
-  /\s*\(\d+(?:th|st|nd|rd)?\s*Anniversary[^)]*\)/i,
-  /\s*\(Remaster(?:ed)?\)/i,
-  /\s*\(Remastered\s*\d{4}\)/i,
-  /\s*\(Acoustic\)/i,
-  /\s*\(Instrumentals?\)/i,
-  /\s*\(Live[^)]*\)/i,
-  /\s*\(Bonus\s*Track[^)]*\)/i,
-  /\s*\(Complete[^)]*\)/i,
-  /\s*\(Music\s+for[^)]*\)/i,
-  /\s*-\s*Deluxe\s*$/i,
-  /\s*-\s*Remastered\s*$/i,
+/**
+ * Comprehensive album edition normalization.
+ * Handles all common special edition formats across music platforms.
+ */
+
+// Edition keywords that appear in parentheses or brackets
+const EDITION_KEYWORDS = [
+  // Deluxe variants
+  'deluxe', 'super deluxe', 'deluxe edition', 'deluxe version',
+  // Expanded/Special/Collector
+  'expanded', 'expanded edition', 'special edition', 'collector\'s edition',
+  'limited edition', 'premium edition', 'ultimate edition', 'complete edition',
+  // Anniversary
+  'anniversary', 'anniversary edition', '\\d+(?:th|st|nd|rd)?\\s*anniversary',
+  // Remaster variants
+  'remaster', 'remastered', 'remastered \\d{4}', '\\d{4} remaster',
+  '\\d{4} mix', '\\d{4} version',
+  // Live variants
+  'live', 'live at [^\\]\\)]*', 'live from [^\\]\\)]*', 'live in [^\\]\\)]*',
+  'mtv unplugged', 'unplugged', 'in concert',
+  // Acoustic/Stripped
+  'acoustic', 'acoustic version', 'stripped', 'stripped down',
+  // Audio formats
+  'mono', 'stereo', 'mono version', 'stereo version',
+  'hi-res', 'high resolution', 'atmos', 'dolby atmos', 'spatial',
+  // Regional variants
+  'uk edition', 'us edition', 'japan edition', 'japanese edition',
+  'international', 'international version', 'import',
+  // Content variants
+  'explicit', 'clean', 'edited', 'censored', 'uncensored',
+  'radio edit', 'single version',
+  // Instrumental/Remix
+  'instrumental', 'instrumentals', 'karaoke',
+  'remix', 'remixed', 'remixes',
+  // Bonus content
+  'bonus track', 'bonus tracks', 'bonus disc', 'with bonus',
+  'extra tracks', 'b-sides',
+  // Demos/Sessions
+  'demo', 'demos', 'sessions', 'the sessions', 'outtakes',
+  // Revisited/Reimagined
+  'revisited', 'reimagined', 'redux', 'reworked', 're-recorded',
+  // Soundtrack
+  'original motion picture soundtrack', 'original soundtrack', 'ost',
+  'motion picture', 'film score',
+  // Format indicators
+  'vinyl', 'cd', 'digital', 'streaming',
+  // Note: Removed standalone '\\d{4}' as it's too broad and would strip
+  // legitimate album titles like "1989", "2001", "1984". Year-based editions
+  // are covered by specific patterns like 'remastered \\d{4}', '\\d{4} remaster'.
 ];
 
+// Build a mega-pattern that matches any edition keyword in () or []
+const EDITION_KEYWORD_PATTERN = new RegExp(
+  `\\s*[([](${EDITION_KEYWORDS.join('|')})[^\\]\\)]*[\\])]`,
+  'gi'
+);
+
+// Patterns for hyphen-based suffixes (no brackets)
+const HYPHEN_EDITION_PATTERNS = [
+  /\s+-\s*deluxe\s*$/i,
+  /\s+-\s*remaster(?:ed)?\s*$/i,
+  /\s+-\s*remastered\s+\d{4}\s*$/i,
+  /\s+-\s*\d{4}\s+remaster(?:ed)?\s*$/i,
+  /\s+-\s*live\s*$/i,
+  /\s+-\s*acoustic\s*$/i,
+  /\s+-\s*unplugged\s*$/i,
+  /\s+-\s*mono\s*$/i,
+  /\s+-\s*stereo\s*$/i,
+  /\s+-\s*expanded\s*$/i,
+  /\s+-\s*anniversary\s*edition?\s*$/i,
+  /\s+-\s*\d+(?:th|st|nd|rd)?\s*anniversary[^-]*$/i,
+  /\s+-\s*special\s*edition?\s*$/i,
+  /\s+-\s*single\s*$/i,
+  /\s+-\s*ep\s*$/i,
+];
+
+// Standalone patterns for specific formats
+const STANDALONE_PATTERNS = [
+  /\s+\[Explicit\]\s*$/i,
+  /\s+\(Explicit\)\s*$/i,
+  /\s+\[Clean\]\s*$/i,
+  /\s+\(Clean\)\s*$/i,
+  // Common Qobuz/Spotify format: "Album Name (Year Remaster)"
+  /\s*\(\d{4}\s+Remaster(?:ed)?\)\s*$/i,
+  // "Album Name [2019 Mix]" style
+  /\s*\[\d{4}\s+Mix\]\s*$/i,
+  // "Album - 25th Anniversary Edition" without parentheses
+  /\s+-\s+\d+(?:th|st|nd|rd)?\s+Anniversary[^()\[\]]*$/i,
+];
+
+/**
+ * Normalize an album title by stripping edition suffixes.
+ * Tries multiple strategies to get the base album name.
+ */
 function stripEditionSuffix(title: string): string {
   let result = title;
-  for (const pattern of EDITION_PATTERNS) {
+
+  // Strategy 1: Remove bracketed/parenthesized edition keywords
+  result = result.replace(EDITION_KEYWORD_PATTERN, '');
+
+  // Strategy 2: Remove hyphen-based suffixes
+  for (const pattern of HYPHEN_EDITION_PATTERNS) {
     result = result.replace(pattern, '');
   }
-  return result.trim();
+
+  // Strategy 3: Remove standalone patterns
+  for (const pattern of STANDALONE_PATTERNS) {
+    result = result.replace(pattern, '');
+  }
+
+  // Strategy 4: Remove any remaining empty brackets
+  result = result.replace(/\s*\(\s*\)\s*/g, '');
+  result = result.replace(/\s*\[\s*\]\s*/g, '');
+
+  // Clean up multiple spaces and trim
+  result = result.replace(/\s+/g, ' ').trim();
+
+  // Remove trailing punctuation that might be left over
+  result = result.replace(/\s*[-:]\s*$/, '').trim();
+
+  return result;
+}
+
+/**
+ * Get multiple normalized variants of an album title for matching.
+ * Returns array of titles to try, from most specific to most general.
+ */
+function getAlbumTitleVariants(title: string): string[] {
+  const variants = new Set<string>();
+
+  // Original title
+  variants.add(title);
+
+  // Basic stripped version
+  const stripped = stripEditionSuffix(title);
+  if (stripped !== title) {
+    variants.add(stripped);
+  }
+
+  // Aggressive strip: remove ALL parenthetical/bracketed content
+  const aggressive = title.replace(/\s*[([][^\]()]*[\])]/g, '').trim();
+  if (aggressive !== title && aggressive.length > 0) {
+    variants.add(aggressive);
+  }
+
+  // Remove "The" prefix
+  if (title.toLowerCase().startsWith('the ')) {
+    variants.add(title.substring(4));
+    if (stripped.toLowerCase().startsWith('the ')) {
+      variants.add(stripped.substring(4));
+    }
+  }
+
+  return Array.from(variants);
 }
 
 type ProgressCallback = (progress: SyncProgress) => void;
@@ -624,25 +751,38 @@ export class AsyncSyncService {
       }
     }
 
-    // Fuzzy match by title and artist
-    const candidates = await this.qobuzClient.searchAlbum(spotifyAlbum.title, spotifyAlbum.artist);
-    if (candidates.length > 0) {
-      const bestMatch = this.findBestAlbumMatch(spotifyAlbum, candidates);
-      if (bestMatch) {
-        return { qobuzId: bestMatch.id, matchType: 'fuzzy' };
+    // Get all title variants to try
+    const titleVariants = getAlbumTitleVariants(spotifyAlbum.title);
+    const allCandidates: QobuzAlbum[] = [];
+    const seenIds = new Set<string>();
+
+    // Search with each title variant
+    for (const titleVariant of titleVariants) {
+      const candidates = await this.qobuzClient.searchAlbum(titleVariant, spotifyAlbum.artist);
+      for (const candidate of candidates) {
+        if (!seenIds.has(candidate.id)) {
+          seenIds.add(candidate.id);
+          allCandidates.push(candidate);
+        }
+      }
+
+      // Also try with just the artist if we haven't found enough candidates
+      if (allCandidates.length < 5 && titleVariant !== spotifyAlbum.title) {
+        const artistOnlyCandidates = await this.qobuzClient.searchAlbum('', spotifyAlbum.artist);
+        for (const candidate of artistOnlyCandidates) {
+          if (!seenIds.has(candidate.id)) {
+            seenIds.add(candidate.id);
+            allCandidates.push(candidate);
+          }
+        }
       }
     }
 
-    // Fallback: try with stripped edition suffix
-    const baseTitle = stripEditionSuffix(spotifyAlbum.title);
-    if (baseTitle !== spotifyAlbum.title) {
-      logger.debug(`Trying base title: '${baseTitle}' (was: '${spotifyAlbum.title}')`);
-      const baseCandidates = await this.qobuzClient.searchAlbum(baseTitle, spotifyAlbum.artist);
-      if (baseCandidates.length > 0) {
-        const bestMatch = this.findBestAlbumMatch({ ...spotifyAlbum, title: baseTitle }, baseCandidates);
-        if (bestMatch) {
-          return { qobuzId: bestMatch.id, matchType: 'fuzzy' };
-        }
+    // Find best match across all candidates using all title variants
+    if (allCandidates.length > 0) {
+      const bestMatch = this.findBestAlbumMatch(spotifyAlbum, allCandidates, titleVariants);
+      if (bestMatch) {
+        return { qobuzId: bestMatch.id, matchType: 'fuzzy' };
       }
     }
 
@@ -651,17 +791,38 @@ export class AsyncSyncService {
 
   private findBestAlbumMatch(
     spotifyAlbum: SpotifyAlbum,
-    candidates: QobuzAlbum[]
+    candidates: QobuzAlbum[],
+    titleVariants?: string[]
   ): QobuzAlbum | null {
-    const spotifyTitle = spotifyAlbum.title.toLowerCase();
     const spotifyArtist = spotifyAlbum.artist.toLowerCase();
+
+    // Use provided variants or generate them
+    const spotifyTitleVariants = (titleVariants || getAlbumTitleVariants(spotifyAlbum.title))
+      .map(t => t.toLowerCase());
 
     let bestMatch: QobuzAlbum | null = null;
     let bestScore = 0;
 
     for (const candidate of candidates) {
-      const titleScore = fuzzyRatio(spotifyTitle, candidate.title.toLowerCase());
-      const artistScore = fuzzyRatio(spotifyArtist, candidate.artist.toLowerCase());
+      const candidateTitle = candidate.title.toLowerCase();
+
+      // Get variants of the candidate title too for cross-matching
+      const candidateTitleVariants = getAlbumTitleVariants(candidate.title)
+        .map(t => t.toLowerCase());
+
+      // Find best title score across all variant combinations
+      let titleScore = 0;
+      for (const spotifyVariant of spotifyTitleVariants) {
+        for (const candidateVariant of candidateTitleVariants) {
+          const score = bestFuzzyScore(spotifyVariant, candidateVariant);
+          if (score > titleScore) {
+            titleScore = score;
+          }
+        }
+      }
+
+      // Artist score
+      const artistScore = bestFuzzyScore(spotifyArtist, candidate.artist.toLowerCase());
 
       // Weighted average favoring title
       let combinedScore = titleScore * 0.6 + artistScore * 0.4;
@@ -673,20 +834,36 @@ export class AsyncSyncService {
         }
       }
 
-      // Bonus for similar track count
+      // Bonus for similar track count (helps distinguish deluxe from standard)
       if (spotifyAlbum.total_tracks && candidate.tracks_count) {
         const trackDiff = Math.abs(spotifyAlbum.total_tracks - candidate.tracks_count);
         if (trackDiff === 0) {
           combinedScore += 5;
         } else if (trackDiff <= 2) {
           combinedScore += 2;
+        } else if (trackDiff <= 4) {
+          combinedScore += 1;
         }
+      }
+
+      // Log high-scoring matches for debugging
+      if (combinedScore >= 70) {
+        logger.debug(
+          `Album candidate: "${candidate.title}" by ${candidate.artist} ` +
+          `(title=${titleScore.toFixed(0)}, artist=${artistScore.toFixed(0)}, combined=${combinedScore.toFixed(0)})`
+        );
       }
 
       if (combinedScore > bestScore && combinedScore >= 70) {
         bestScore = combinedScore;
         bestMatch = candidate;
       }
+    }
+
+    if (bestMatch) {
+      logger.info(
+        `Album match: "${spotifyAlbum.title}" -> "${bestMatch.title}" (score=${bestScore.toFixed(0)})`
+      );
     }
 
     return bestMatch;
@@ -704,21 +881,31 @@ export class AsyncSyncService {
   }
 
   private buildAlbumSuggestions(spotifyAlbum: SpotifyAlbum, candidates: QobuzAlbum[]): Suggestion[] {
-    const spotifyTitle = spotifyAlbum.title.toLowerCase();
     const spotifyArtist = spotifyAlbum.artist.toLowerCase();
-    const baseTitle = stripEditionSuffix(spotifyAlbum.title).toLowerCase();
+
+    // Get all title variants for comprehensive matching
+    const spotifyTitleVariants = getAlbumTitleVariants(spotifyAlbum.title)
+      .map(t => t.toLowerCase());
 
     const suggestions: Suggestion[] = [];
 
     for (const candidate of candidates) {
-      const candidateTitle = candidate.title.toLowerCase();
+      const candidateTitleVariants = getAlbumTitleVariants(candidate.title)
+        .map(t => t.toLowerCase());
       const candidateArtist = candidate.artist.toLowerCase();
 
-      const titleScore = Math.max(
-        fuzzyRatio(spotifyTitle, candidateTitle),
-        fuzzyRatio(baseTitle, candidateTitle)
-      );
-      const artistScore = fuzzyRatio(spotifyArtist, candidateArtist);
+      // Find best title score across all variant combinations
+      let titleScore = 0;
+      for (const spotifyVariant of spotifyTitleVariants) {
+        for (const candidateVariant of candidateTitleVariants) {
+          const score = bestFuzzyScore(spotifyVariant, candidateVariant);
+          if (score > titleScore) {
+            titleScore = score;
+          }
+        }
+      }
+
+      const artistScore = bestFuzzyScore(spotifyArtist, candidateArtist);
 
       suggestions.push({
         qobuz_id: parseInt(candidate.id),
