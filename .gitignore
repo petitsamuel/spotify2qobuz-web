@@ -1,40 +1,46 @@
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-!ts/next/src/lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
+# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
 
-# Virtual Environment
-.venv/
-venv/
-ENV/
-env/
+# dependencies
+/node_modules
+/.pnp
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
 
-# Testing
-.pytest_cache/
-.coverage
-htmlcov/
-.tox/
-.nox/
-coverage.xml
-*.cover
+# testing
+/coverage
+
+# next.js
+/.next/
+/out/
+
+# production
+/build
+
+# misc
+.DS_Store
+*.pem
+
+# debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# env files (can opt-in for committing if needed)
+.env
+.env*.local
+!.env.example
+
+# vercel
+.vercel
+
+# typescript
+*.tsbuildinfo
+next-env.d.ts
 
 # IDE
 .vscode/
@@ -43,40 +49,8 @@ coverage.xml
 *.swo
 *~
 
-# Credentials (IMPORTANT! NEVER COMMIT THESE!)
-credentials.md
-credentials*.md
-.env
-*.env
-!.env.example
-*.pem
-*.key
-
-# HAR files (may contain tokens)
-*.har
-
 # Logs
 *.log
-logs/
-sync_logs/
-
-# Reports
-sync_report_*.json
-
-# SQLite database and encryption keys
-data/
-*.db
-.encryption_key
-
-# Spotify cache
-.cache
-.cache-*
-
-# Backup files
-*.bak
-*.old
-README.old.md
 
 # OS
-.DS_Store
 Thumbs.db
