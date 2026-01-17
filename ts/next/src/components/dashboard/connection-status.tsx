@@ -1,7 +1,6 @@
 'use client';
 
-import { Suspense, useEffect } from 'react';
-import { useSearchParams } from 'next/navigation';
+import { useEffect, useRef } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -21,29 +20,33 @@ interface QobuzStats {
   playlists: number;
 }
 
-// Separate component that uses useSearchParams (requires Suspense)
-function ConnectionParamsHandler() {
-  const searchParams = useSearchParams();
-  const queryClient = useQueryClient();
-
-  // Invalidate queries when redirected back from OAuth
-  useEffect(() => {
-    if (searchParams.get('spotify_connected') === 'true') {
-      queryClient.invalidateQueries({ queryKey: ['spotifyStats'] });
-      // Clean up URL
-      window.history.replaceState({}, '', '/');
-    }
-    if (searchParams.get('qobuz_connected') === 'true') {
-      queryClient.invalidateQueries({ queryKey: ['qobuzStats'] });
-      // Clean up URL
-      window.history.replaceState({}, '', '/');
-    }
-  }, [searchParams, queryClient]);
-
-  return null;
-}
-
 export function ConnectionStatus() {
+  const queryClient = useQueryClient();
+  const hasProcessedOAuthRef = useRef(false);
+
+  // Handle OAuth redirect params on mount - use window.location directly
+  // to avoid Next.js useSearchParams hydration timing issues
+  useEffect(() => {
+    if (hasProcessedOAuthRef.current) return;
+
+    const params = new URLSearchParams(window.location.search);
+    let shouldCleanUrl = false;
+
+    if (params.get('spotify_connected') === 'true') {
+      queryClient.invalidateQueries({ queryKey: ['spotifyStats'] });
+      shouldCleanUrl = true;
+    }
+    if (params.get('qobuz_connected') === 'true') {
+      queryClient.invalidateQueries({ queryKey: ['qobuzStats'] });
+      shouldCleanUrl = true;
+    }
+
+    if (shouldCleanUrl) {
+      hasProcessedOAuthRef.current = true;
+      window.history.replaceState({}, '', '/');
+    }
+  }, [queryClient]);
+
   const spotifyQuery = useQuery<SpotifyStats | null>({
     queryKey: ['spotifyStats'],
     queryFn: async () => {
@@ -79,11 +82,7 @@ export function ConnectionStatus() {
   };
 
   return (
-    <>
-      <Suspense fallback={null}>
-        <ConnectionParamsHandler />
-      </Suspense>
-      <div className="grid gap-4 md:grid-cols-2">
+    <div className="grid gap-4 md:grid-cols-2">
         <Card>
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
             <CardTitle className="text-sm font-medium">Spotify</CardTitle>
@@ -141,7 +140,6 @@ export function ConnectionStatus() {
             )}
           </CardContent>
         </Card>
-      </div>
-    </>
+    </div>
   );
 }
