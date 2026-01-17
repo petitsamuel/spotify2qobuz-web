@@ -9,6 +9,7 @@ export interface SpotifyTrack {
   id: string;
   title: string;
   artist: string;
+  allArtists: string[];  // All artists for better matching of collaborations
   album: string;
   duration: number;
   isrc: string | null;
@@ -178,6 +179,7 @@ export class SpotifyClient {
           id: trackData.id,
           title: trackData.name,
           artist: trackData.artists[0]?.name || 'Unknown',
+          allArtists: trackData.artists.map(a => a.name),
           album: trackData.album.name,
           duration: trackData.duration_ms,
           isrc: trackData.external_ids?.isrc || null,
@@ -223,6 +225,7 @@ export class SpotifyClient {
           id: trackData.id,
           title: trackData.name,
           artist: trackData.artists[0]?.name || 'Unknown',
+          allArtists: trackData.artists.map(a => a.name),
           album: trackData.album.name,
           duration: trackData.duration_ms,
           isrc: trackData.external_ids?.isrc || null,
@@ -280,6 +283,7 @@ export class SpotifyClient {
           id: trackData.id,
           title: trackData.name,
           artist: trackData.artists[0]?.name || 'Unknown',
+          allArtists: trackData.artists.map(a => a.name),
           album: trackData.album.name,
           duration: trackData.duration_ms,
           isrc: trackData.external_ids?.isrc || null,

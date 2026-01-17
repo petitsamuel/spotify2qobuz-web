@@ -37,6 +37,14 @@ export interface QobuzPlaylist {
 const QOBUZ_API_BASE = 'https://www.qobuz.com/api.json/0.2';
 const QOBUZ_APP_ID = process.env.QOBUZ_APP_ID || '798273057';
 
+/**
+ * Normalize ISRC codes for comparison.
+ * ISRCs can appear with or without hyphens: USRC17607839 vs US-RC1-76-07839
+ */
+function normalizeIsrc(isrc: string): string {
+  return isrc.toUpperCase().replace(/[-\s]/g, '');
+}
+
 // Rate limiting constants
 const INITIAL_DELAY_MS = 50;
 const MAX_DELAY_MS = 5000;
@@ -253,9 +261,11 @@ export class QobuzClient {
       }> };
     }>('track/search', { query: isrc, limit: 25 });
 
+    const normalizedSearchIsrc = normalizeIsrc(isrc);
+
     if (data.tracks?.items) {
       for (const item of data.tracks.items) {
-        if (item.isrc?.toUpperCase() === isrc.toUpperCase()) {
+        if (item.isrc && normalizeIsrc(item.isrc) === normalizedSearchIsrc) {
           return {
             id: item.id,
             title: item.title,
@@ -283,7 +293,7 @@ export class QobuzClient {
 
       if (metadataData.tracks?.items) {
         for (const item of metadataData.tracks.items) {
-          if (item.isrc?.toUpperCase() === isrc.toUpperCase()) {
+          if (item.isrc && normalizeIsrc(item.isrc) === normalizedSearchIsrc) {
             return {
               id: item.id,
               title: item.title,
@@ -337,6 +347,7 @@ export class QobuzClient {
 
   /**
    * Search for candidates (multiple tracks) for fuzzy matching.
+   * Now includes ISRC when available for cross-verification.
    */
   async searchCandidates(title: string, artist: string): Promise<QobuzTrack[]> {
     const query = `${title} ${artist}`.trim();
@@ -349,6 +360,7 @@ export class QobuzClient {
         performer: { name: string };
         album: { title: string };
         duration: number;
+        isrc?: string;
       }> };
     }>('track/search', { query, limit: 15 });
 
@@ -362,6 +374,7 @@ export class QobuzClient {
       artist: item.performer.name,
       album: item.album.title,
       duration: item.duration * 1000,
+      isrc: item.isrc,
     }));
   }
 

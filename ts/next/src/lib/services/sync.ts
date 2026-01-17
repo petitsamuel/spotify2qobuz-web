@@ -9,7 +9,7 @@
 import { logger } from '../logger';
 import { SpotifyClient, SpotifyTrack, SpotifyAlbum } from './spotify';
 import { QobuzClient, QobuzAlbum } from './qobuz';
-import { TrackMatcher, MatchResult, Suggestion, fuzzyRatio } from './matcher';
+import { TrackMatcher, Suggestion, bestFuzzyScore } from './matcher';
 import type { SyncProgress, SyncReport, AlbumSyncReport, MissingTrack } from '../types';
 
 // Edition patterns to strip when searching for base albums
@@ -660,8 +660,9 @@ export class AsyncSyncService {
     let bestScore = 0;
 
     for (const candidate of candidates) {
-      const titleScore = fuzzyRatio(spotifyTitle, candidate.title.toLowerCase());
-      const artistScore = fuzzyRatio(spotifyArtist, candidate.artist.toLowerCase());
+      // Use bestFuzzyScore for consistency with track matching
+      const titleScore = bestFuzzyScore(spotifyTitle, candidate.title.toLowerCase());
+      const artistScore = bestFuzzyScore(spotifyArtist, candidate.artist.toLowerCase());
 
       // Weighted average favoring title
       let combinedScore = titleScore * 0.6 + artistScore * 0.4;
@@ -714,11 +715,12 @@ export class AsyncSyncService {
       const candidateTitle = candidate.title.toLowerCase();
       const candidateArtist = candidate.artist.toLowerCase();
 
+      // Use bestFuzzyScore for consistency with track matching
       const titleScore = Math.max(
-        fuzzyRatio(spotifyTitle, candidateTitle),
-        fuzzyRatio(baseTitle, candidateTitle)
+        bestFuzzyScore(spotifyTitle, candidateTitle),
+        bestFuzzyScore(baseTitle, candidateTitle)
       );
-      const artistScore = fuzzyRatio(spotifyArtist, candidateArtist);
+      const artistScore = bestFuzzyScore(spotifyArtist, candidateArtist);
 
       suggestions.push({
         qobuz_id: parseInt(candidate.id),
