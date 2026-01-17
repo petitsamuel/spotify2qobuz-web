@@ -811,15 +811,30 @@ export class QobuzClient {
   }
 
   /**
-   * Get stats for the Qobuz library.
+   * Get stats for the Qobuz library including user display name.
    * Note: Individual stat failures are propagated so callers can handle them.
    */
   async getStats(): Promise<{
+    display_name: string;
     playlists: number;
     fromSpotify: number;
     favorites: number;
-    favoriteAlbums: number;
+    albums: number;
   }> {
+    // Fetch user info along with stats - getUserFavorites returns user data
+    const userInfoResponse = await fetch(
+      `${QOBUZ_API_BASE}/favorite/getUserFavorites?type=tracks&limit=1`,
+      { headers: this.headers, signal: AbortSignal.timeout(10000) }
+    );
+
+    let displayName = 'Qobuz User';
+    if (userInfoResponse.ok) {
+      const userInfoData = await userInfoResponse.json();
+      if (userInfoData.user?.display_name) {
+        displayName = userInfoData.user.display_name;
+      }
+    }
+
     const [playlists, favoritesCount, favoriteAlbumsCount] = await Promise.all([
       this.listUserPlaylists(),
       this.getFavoritesCount(),
@@ -831,10 +846,11 @@ export class QobuzClient {
     ).length;
 
     return {
+      display_name: displayName,
       playlists: playlists.length,
       fromSpotify,
       favorites: favoritesCount,
-      favoriteAlbums: favoriteAlbumsCount,
+      albums: favoriteAlbumsCount,
     };
   }
 }

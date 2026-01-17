@@ -394,19 +394,26 @@ export class SpotifyClient {
   }
 
   /**
-   * Get library statistics.
+   * Get library statistics including user display name.
    */
-  async getStats(): Promise<{ playlists: number; savedTracks: number; savedAlbums: number }> {
-    const [playlistsData, tracksData, albumsData] = await Promise.all([
+  async getStats(): Promise<{
+    display_name: string;
+    playlists: number;
+    saved_tracks: number;
+    saved_albums: number;
+  }> {
+    const [profileData, playlistsData, tracksData, albumsData] = await Promise.all([
+      this.request<{ display_name: string | null; id: string }>('/me'),
       this.request<{ total: number }>('/me/playlists?limit=1'),
       this.request<{ total: number }>('/me/tracks?limit=1'),
       this.request<{ total: number }>('/me/albums?limit=1'),
     ]);
 
     return {
+      display_name: profileData.display_name ?? profileData.id,
       playlists: playlistsData.total,
-      savedTracks: tracksData.total,
-      savedAlbums: albumsData.total,
+      saved_tracks: tracksData.total,
+      saved_albums: albumsData.total,
     };
   }
 
