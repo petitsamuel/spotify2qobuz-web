@@ -6,7 +6,7 @@
 import { logger } from '../lib/logger';
 import { SpotifyClient, SpotifyTrack, SpotifyAlbum } from './spotify';
 import { QobuzClient, QobuzAlbum } from './qobuz';
-import { TrackMatcher, MatchResult, Suggestion } from './matcher';
+import { TrackMatcher, MatchResult, Suggestion, fuzzyRatio } from './matcher';
 
 // Edition patterns to strip when searching for base albums
 const EDITION_PATTERNS = [
@@ -263,6 +263,7 @@ export class AsyncSyncService {
         const trackIds = await this.qobuzClient.getPlaylistTracks(qobuzPlaylistId);
         trackIds.forEach(id => existingTrackIds.add(id));
       } else {
+        // createPlaylist now throws on error
         qobuzPlaylistId = await this.qobuzClient.createPlaylist(
           qobuzPlaylistName,
           `Synced from Spotify on ${new Date().toISOString().split('T')[0]}`
@@ -312,7 +313,12 @@ export class AsyncSyncService {
     // Add tracks to playlist
     if (!dryRun && qobuzPlaylistId) {
       for (const trackId of tracksToAdd) {
-        await this.qobuzClient.addTrack(qobuzPlaylistId, trackId);
+        try {
+          await this.qobuzClient.addTrack(qobuzPlaylistId, trackId);
+        } catch (error) {
+          logger.error(`Failed to add track ${trackId} to playlist: ${error}`);
+          // Continue with other tracks even if one fails
+        }
       }
     }
   }
@@ -361,10 +367,11 @@ export class AsyncSyncService {
       const flushFavorites = async () => {
         if (pendingFavorites.length > 0 && !dryRun) {
           const trackIds = pendingFavorites.map(f => f.qobuz_id);
+          const currentBatch = [...pendingFavorites]; // Copy before clearing
           const success = await this.qobuzClient.addFavoriteTracksBatch(trackIds);
 
           if (success) {
-            for (const f of pendingFavorites) {
+            for (const f of currentBatch) {
               if (onTrackSynced) {
                 onTrackSynced(f.spotify_id, String(f.qobuz_id));
               }
@@ -372,6 +379,7 @@ export class AsyncSyncService {
           } else {
             logger.error(`Failed to add ${trackIds.length} tracks to Qobuz favorites`);
             report.errors.push(`Failed to add batch of ${trackIds.length} tracks to Qobuz`);
+            // Don't mark failed tracks as synced - they'll be retried on next sync
           }
           pendingFavorites.length = 0;
         }
@@ -512,10 +520,11 @@ export class AsyncSyncService {
       const flushAlbums = async () => {
         if (pendingFavorites.length > 0 && !dryRun) {
           const albumIds = pendingFavorites.map(f => f.qobuz_id);
+          const currentBatch = [...pendingFavorites]; // Copy before clearing
           const success = await this.qobuzClient.addFavoriteAlbumsBatch(albumIds);
 
           if (success) {
-            for (const f of pendingFavorites) {
+            for (const f of currentBatch) {
               if (onAlbumSynced) {
                 onAlbumSynced(f.spotify_id, f.qobuz_id);
               }
@@ -523,6 +532,7 @@ export class AsyncSyncService {
           } else {
             logger.error(`Failed to add ${albumIds.length} albums to Qobuz favorites`);
             report.errors.push(`Failed to add batch of ${albumIds.length} albums to Qobuz`);
+            // Don't mark failed albums as synced - they'll be retried on next sync
           }
           pendingFavorites.length = 0;
         }
@@ -670,8 +680,8 @@ export class AsyncSyncService {
     let bestScore = 0;
 
     for (const candidate of candidates) {
-      const titleScore = this.fuzzyRatio(spotifyTitle, candidate.title.toLowerCase());
-      const artistScore = this.fuzzyRatio(spotifyArtist, candidate.artist.toLowerCase());
+      const titleScore = fuzzyRatio(spotifyTitle, candidate.title.toLowerCase());
+      const artistScore = fuzzyRatio(spotifyArtist, candidate.artist.toLowerCase());
 
       // Weighted average favoring title
       let combinedScore = titleScore * 0.6 + artistScore * 0.4;
@@ -725,10 +735,10 @@ export class AsyncSyncService {
       const candidateArtist = candidate.artist.toLowerCase();
 
       const titleScore = Math.max(
-        this.fuzzyRatio(spotifyTitle, candidateTitle),
-        this.fuzzyRatio(baseTitle, candidateTitle)
+        fuzzyRatio(spotifyTitle, candidateTitle),
+        fuzzyRatio(baseTitle, candidateTitle)
       );
-      const artistScore = this.fuzzyRatio(spotifyArtist, candidateArtist);
+      const artistScore = fuzzyRatio(spotifyArtist, candidateArtist);
 
       suggestions.push({
         qobuz_id: parseInt(candidate.id),
@@ -744,39 +754,5 @@ export class AsyncSyncService {
 
     suggestions.sort((a, b) => b.score - a.score);
     return suggestions.slice(0, 5);
-  }
-
-  private fuzzyRatio(s1: string, s2: string): number {
-    if (!s1 || !s2) return 0;
-    if (s1 === s2) return 100;
-
-    const len1 = s1.length;
-    const len2 = s2.length;
-    const maxLen = Math.max(len1, len2);
-
-    if (maxLen === 0) return 100;
-
-    // Levenshtein distance
-    const matrix: number[][] = [];
-    for (let i = 0; i <= len1; i++) {
-      matrix[i] = [i];
-    }
-    for (let j = 0; j <= len2; j++) {
-      matrix[0][j] = j;
-    }
-
-    for (let i = 1; i <= len1; i++) {
-      for (let j = 1; j <= len2; j++) {
-        const cost = s1[i - 1] === s2[j - 1] ? 0 : 1;
-        matrix[i][j] = Math.min(
-          matrix[i - 1][j] + 1,
-          matrix[i][j - 1] + 1,
-          matrix[i - 1][j - 1] + cost
-        );
-      }
-    }
-
-    const distance = matrix[len1][len2];
-    return Math.round((1 - distance / maxLen) * 100);
   }
 }

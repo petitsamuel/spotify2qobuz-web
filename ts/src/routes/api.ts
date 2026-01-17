@@ -63,9 +63,14 @@ export function createApiRoutes(storage: Storage): Hono {
       return c.json({ error: 'Missing qobuz_id' }, 400);
     }
 
+    const qobuzIdNum = parseInt(qobuzId, 10);
+    if (isNaN(qobuzIdNum) || qobuzIdNum <= 0) {
+      return c.json({ error: 'Invalid qobuz_id: must be a positive integer' }, 400);
+    }
+
     try {
       const client = new QobuzClient(creds.user_auth_token);
-      const success = await client.addFavoriteTrack(parseInt(qobuzId));
+      const success = await client.addFavoriteTrack(qobuzIdNum);
 
       if (success && spotifyId) {
         // Mark as synced and resolve unmatched
@@ -115,8 +120,9 @@ export function createApiRoutes(storage: Storage): Hono {
   app.get('/unmatched', async (c) => {
     const syncType = c.req.query('sync_type');
     const status = c.req.query('status') || 'pending';
-    const limit = parseInt(c.req.query('limit') || '100');
-    const offset = parseInt(c.req.query('offset') || '0');
+    // Validate and clamp limit/offset to prevent abuse
+    const limit = Math.min(Math.max(1, parseInt(c.req.query('limit') || '100', 10) || 100), 500);
+    const offset = Math.max(0, parseInt(c.req.query('offset') || '0', 10) || 0);
 
     const tracks = await storage.getUnmatchedTracks(syncType, status, limit, offset);
     const total = await storage.getUnmatchedCount(syncType, status);
@@ -135,6 +141,14 @@ export function createApiRoutes(storage: Storage): Hono {
       return c.json({ error: 'Missing qobuz_id' }, 400);
     }
 
+    // Validate qobuz_id for track resolution (albums can have string IDs)
+    if (syncType !== 'albums') {
+      const qobuzIdNum = parseInt(qobuzId, 10);
+      if (isNaN(qobuzIdNum) || qobuzIdNum <= 0) {
+        return c.json({ error: 'Invalid qobuz_id: must be a positive integer' }, 400);
+      }
+    }
+
     // Add to Qobuz favorites
     const creds = await storage.getCredentials('qobuz') as { user_auth_token: string } | null;
     if (creds) {
@@ -142,7 +156,7 @@ export function createApiRoutes(storage: Storage): Hono {
       if (syncType === 'albums') {
         await client.addFavoriteAlbum(qobuzId);
       } else {
-        await client.addFavoriteTrack(parseInt(qobuzId));
+        await client.addFavoriteTrack(parseInt(qobuzId, 10));
       }
     }
 
@@ -183,7 +197,8 @@ export function createApiRoutes(storage: Storage): Hono {
 
   // Get migrations/history
   app.get('/migrations', async (c) => {
-    const limit = parseInt(c.req.query('limit') || '20');
+    // Validate and clamp limit
+    const limit = Math.min(Math.max(1, parseInt(c.req.query('limit') || '20', 10) || 20), 100);
     const migrations = await storage.getMigrations(limit);
     return c.json({ migrations });
   });

@@ -30,7 +30,7 @@ export interface QobuzPlaylist {
 }
 
 const QOBUZ_API_BASE = 'https://www.qobuz.com/api.json/0.2';
-const QOBUZ_APP_ID = '798273057'; // App ID used by web player
+const QOBUZ_APP_ID = process.env.QOBUZ_APP_ID || '798273057'; // App ID (defaults to web player ID)
 
 /**
  * Adaptive rate limiter that slows down when rate limited.
@@ -289,8 +289,9 @@ export class QobuzClient {
       logger.debug(`No exact ISRC match found for: ${isrc}`);
       return null;
     } catch (error) {
+      // Propagate API errors so callers can distinguish "not found" from "API failure"
       logger.error(`Error searching by ISRC ${isrc}: ${error}`);
-      return null;
+      throw error;
     }
   }
 
@@ -329,8 +330,9 @@ export class QobuzClient {
 
       return null;
     } catch (error) {
+      // Propagate API errors so callers can distinguish "not found" from "API failure"
       logger.error(`Error searching by metadata ${title} - ${artist}: ${error}`);
-      return null;
+      throw error;
     }
   }
 
@@ -364,78 +366,68 @@ export class QobuzClient {
         duration: item.duration * 1000,
       }));
     } catch (error) {
+      // Propagate API errors so callers can handle them appropriately
       logger.error(`Error searching candidates: ${error}`);
-      return [];
+      throw error;
     }
   }
 
   /**
    * Create a new playlist.
+   * Throws on error to allow callers to handle failures.
    */
-  async createPlaylist(name: string, description: string = ''): Promise<string | null> {
-    try {
-      const response = await fetch(`${QOBUZ_API_BASE}/playlist/create`, {
-        method: 'POST',
-        headers: {
-          ...this.headers,
-          'Content-Type': 'application/x-www-form-urlencoded',
-        },
-        body: new URLSearchParams({
-          name,
-          is_public: 'false',
-          is_collaborative: 'false',
-          ...(description && { description }),
-        }),
-        signal: AbortSignal.timeout(10000),
-      });
+  async createPlaylist(name: string, description: string = ''): Promise<string> {
+    const response = await fetch(`${QOBUZ_API_BASE}/playlist/create`, {
+      method: 'POST',
+      headers: {
+        ...this.headers,
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: new URLSearchParams({
+        name,
+        is_public: 'false',
+        is_collaborative: 'false',
+        ...(description && { description }),
+      }),
+      signal: AbortSignal.timeout(10000),
+    });
 
-      if (!response.ok) {
-        const text = await response.text();
-        logger.error(`Error creating playlist ${name}: ${response.status} - ${text}`);
-        return null;
-      }
-
-      const result = await response.json();
-      const playlistId = String(result.id);
-      logger.info(`Created Qobuz playlist: ${name} (ID: ${playlistId})`);
-      return playlistId;
-    } catch (error) {
-      logger.error(`Error creating playlist ${name}: ${error}`);
-      return null;
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`Failed to create playlist ${name}: ${response.status} - ${text}`);
     }
+
+    const result = await response.json();
+    const playlistId = String(result.id);
+    logger.info(`Created Qobuz playlist: ${name} (ID: ${playlistId})`);
+    return playlistId;
   }
 
   /**
    * Add a track to a playlist.
+   * Throws on error to allow callers to handle failures and implement retry logic.
    */
-  async addTrack(playlistId: string, trackId: number): Promise<boolean> {
-    try {
-      const response = await fetch(`${QOBUZ_API_BASE}/playlist/addTracks`, {
-        method: 'POST',
-        headers: {
-          ...this.headers,
-          'Content-Type': 'application/x-www-form-urlencoded',
-        },
-        body: new URLSearchParams({
-          playlist_id: playlistId,
-          track_ids: String(trackId),
-        }),
-        signal: AbortSignal.timeout(10000),
-      });
+  async addTrack(playlistId: string, trackId: number): Promise<void> {
+    const response = await fetch(`${QOBUZ_API_BASE}/playlist/addTracks`, {
+      method: 'POST',
+      headers: {
+        ...this.headers,
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: new URLSearchParams({
+        playlist_id: playlistId,
+        track_ids: String(trackId),
+      }),
+      signal: AbortSignal.timeout(10000),
+    });
 
-      await new Promise(resolve => setTimeout(resolve, 100)); // Rate limit prevention
+    await new Promise(resolve => setTimeout(resolve, 100)); // Rate limit prevention
 
-      if (!response.ok) {
-        logger.error(`Error adding track ${trackId} to playlist ${playlistId}`);
-        return false;
-      }
-
-      logger.debug(`Added track ${trackId} to playlist ${playlistId}`);
-      return true;
-    } catch (error) {
-      logger.error(`Error adding track ${trackId} to playlist ${playlistId}: ${error}`);
-      return false;
+    if (!response.ok) {
+      throw new Error(`Failed to add track ${trackId} to playlist ${playlistId}: ${response.status}`);
     }
+
+    logger.debug(`Added track ${trackId} to playlist ${playlistId}`);
   }
 
   /**
@@ -690,8 +682,9 @@ export class QobuzClient {
       logger.debug(`Found ${albums.length} albums for query: ${query}`);
       return albums;
     } catch (error) {
+      // Propagate API errors so callers can handle them appropriately
       logger.error(`Error searching albums for ${title} - ${artist}: ${error}`);
-      return [];
+      throw error;
     }
   }
 
@@ -730,38 +723,37 @@ export class QobuzClient {
       logger.debug(`No exact UPC match found for: ${upc}`);
       return null;
     } catch (error) {
+      // Propagate API errors so callers can distinguish "not found" from "API failure"
       logger.error(`Error searching by UPC ${upc}: ${error}`);
-      return null;
+      throw error;
     }
   }
 
   /**
    * Get favorite album IDs.
+   * Throws on error to prevent incorrect sync behavior (missing album deduplication).
    */
   async getFavoriteAlbums(limit: number = 5000): Promise<string[]> {
-    try {
-      const response = await fetch(
-        `${QOBUZ_API_BASE}/favorite/getUserFavorites?type=albums&limit=${limit}&offset=0`,
-        { headers: this.headers, signal: AbortSignal.timeout(30000) }
-      );
+    const response = await fetch(
+      `${QOBUZ_API_BASE}/favorite/getUserFavorites?type=albums&limit=${limit}&offset=0`,
+      { headers: this.headers, signal: AbortSignal.timeout(30000) }
+    );
 
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-
-      const data = await response.json();
-      const albumIds: string[] = [];
-
-      if (data.albums?.items) {
-        for (const item of data.albums.items) {
-          if (item.id) albumIds.push(String(item.id));
-        }
-      }
-
-      logger.info(`Retrieved ${albumIds.length} favorite albums from Qobuz`);
-      return albumIds;
-    } catch (error) {
-      logger.error(`Failed to get favorite albums: ${error}`);
-      return [];
+    if (!response.ok) {
+      throw new Error(`Failed to fetch Qobuz favorite albums: HTTP ${response.status}`);
     }
+
+    const data = await response.json();
+    const albumIds: string[] = [];
+
+    if (data.albums?.items) {
+      for (const item of data.albums.items) {
+        if (item.id) albumIds.push(String(item.id));
+      }
+    }
+
+    logger.info(`Retrieved ${albumIds.length} favorite albums from Qobuz`);
+    return albumIds;
   }
 
   /**

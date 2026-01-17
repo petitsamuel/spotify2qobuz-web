@@ -177,7 +177,13 @@ export class Storage {
   async getCredentials(service: string): Promise<Record<string, unknown> | null> {
     const rows = await this.sql`SELECT data FROM credentials WHERE service = ${service}`;
     if (rows.length > 0) {
-      return JSON.parse(decrypt(rows[0].data, this.encryptionKey));
+      try {
+        return JSON.parse(decrypt(rows[0].data, this.encryptionKey));
+      } catch (error) {
+        logger.error(`Failed to decrypt credentials for ${service}: ${error}`);
+        // If decryption fails (e.g., key changed), return null so caller can re-authenticate
+        return null;
+      }
     }
     return null;
   }
@@ -273,7 +279,12 @@ export class Storage {
     if (rows.length > 0) {
       const row = rows[0] as SyncTask;
       if (row.progress_json) {
-        row.progress = JSON.parse(row.progress_json);
+        try {
+          row.progress = JSON.parse(row.progress_json);
+        } catch (error) {
+          logger.error(`Failed to parse progress_json for task ${taskId}: ${error}`);
+          row.progress = {};
+        }
       }
       return row;
     }
@@ -387,7 +398,12 @@ export class Storage {
     return rows.map((row: Record<string, unknown>) => {
       const track = row as unknown as UnmatchedTrack;
       if (track.suggestions_json) {
-        track.suggestions = JSON.parse(track.suggestions_json);
+        try {
+          track.suggestions = JSON.parse(track.suggestions_json);
+        } catch (error) {
+          logger.error(`Failed to parse suggestions_json for track ${track.spotify_id}: ${error}`);
+          track.suggestions = [];
+        }
       } else {
         track.suggestions = [];
       }

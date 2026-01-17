@@ -115,6 +115,20 @@ function renderTemplate(name: string, data: Record<string, unknown>): string {
   return ejs.render(template, data, { filename: templatePath });
 }
 
+// HTML escape helper to prevent XSS
+function escapeHtml(s: string): string {
+  return s.replace(/[&<>"']/g, (c) => {
+    const entities: Record<string, string> = {
+      '&': '&amp;',
+      '<': '&lt;',
+      '>': '&gt;',
+      '"': '&quot;',
+      "'": '&#39;',
+    };
+    return entities[c] || c;
+  });
+}
+
 // Global error handler for unhandled errors
 app.onError((err, c) => {
   logger.error(`Unhandled error: ${err.message}`);
@@ -124,7 +138,7 @@ app.onError((err, c) => {
     <head><title>Error</title></head>
     <body style="font-family: system-ui; padding: 2rem; background: #1a1a2e; color: #eee;">
       <h1>Something went wrong</h1>
-      <p>${err.message}</p>
+      <p>${escapeHtml(err.message)}</p>
       <a href="/" style="color: #6366f1;">Go back home</a>
     </body>
     </html>

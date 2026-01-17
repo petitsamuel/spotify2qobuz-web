@@ -3,7 +3,6 @@
  * Equivalent to Python's src/matcher_v2.py
  */
 
-import Fuse from 'fuse.js';
 import { logger } from '../lib/logger';
 import { QobuzClient, QobuzTrack } from './qobuz';
 import type { SpotifyTrack } from './spotify';
@@ -62,8 +61,9 @@ const KNOWN_DUOS = new Set([
 
 /**
  * Calculate fuzzy similarity ratio between two strings (0-100).
+ * Uses Levenshtein distance.
  */
-function fuzzyRatio(s1: string, s2: string): number {
+export function fuzzyRatio(s1: string, s2: string): number {
   if (!s1 || !s2) return 0;
   if (s1 === s2) return 100;
 

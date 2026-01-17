@@ -51,6 +51,17 @@ export function createSyncRoutes(storage: Storage): Hono {
       return c.json({ error: 'Invalid sync type' }, 400);
     }
 
+    // Check for existing active sync to prevent concurrent operations
+    for (const [existingTaskId, task] of activeTasks) {
+      if (task.status === 'running' || task.status === 'starting') {
+        return c.json({
+          error: 'A sync is already in progress',
+          active_task_id: existingTaskId,
+          sync_type: task.syncType,
+        }, 409);
+      }
+    }
+
     // Get clients
     const clients = await getClients(storage);
     if (!clients) {
@@ -82,8 +93,17 @@ export function createSyncRoutes(storage: Storage): Hono {
       dryRun,
     });
 
-    // Start sync in background
-    runSync(taskId, syncType, dryRun, storage, clients.spotify, clients.qobuz, migrationId);
+    // Start sync in background with error handling for unexpected failures
+    runSync(taskId, syncType, dryRun, storage, clients.spotify, clients.qobuz, migrationId)
+      .catch((err) => {
+        logger.error(`Unexpected sync error for task ${taskId}: ${err}`);
+        const task = activeTasks.get(taskId);
+        if (task) {
+          task.status = 'failed';
+          task.error = String(err);
+          scheduleTaskCleanup(taskId);
+        }
+      });
 
     logger.info(`Started ${syncType} sync (task=${taskId}, dry_run=${dryRun})`);
     return c.json({ task_id: taskId, status: 'starting' });
