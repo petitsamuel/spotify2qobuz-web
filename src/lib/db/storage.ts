@@ -298,39 +298,55 @@ export class Storage {
         -- Drop old credentials constraint if it exists (legacy single-user constraint)
         IF EXISTS (
           SELECT 1 FROM pg_constraint
-          WHERE conname = 'credentials_service_key'
+          WHERE conname = 'credentials_service_key' AND conrelid = 'credentials'::regclass
         ) THEN
           ALTER TABLE credentials DROP CONSTRAINT credentials_service_key;
         END IF;
 
+        -- Deduplicate credentials before adding constraint (keeps most recent by id)
+        DELETE FROM credentials a USING credentials b
+        WHERE a.id > b.id AND a.user_id = b.user_id AND a.service = b.service;
+
         -- Create new multi-user constraint if it doesn't exist
         IF NOT EXISTS (
           SELECT 1 FROM pg_constraint
-          WHERE conname = 'credentials_user_id_service_key'
+          WHERE conname = 'credentials_user_id_service_key' AND conrelid = 'credentials'::regclass
         ) THEN
           ALTER TABLE credentials ADD CONSTRAINT credentials_user_id_service_key UNIQUE (user_id, service);
         END IF;
 
+        -- Deduplicate synced_tracks before adding constraint
+        DELETE FROM synced_tracks a USING synced_tracks b
+        WHERE a.id > b.id AND a.user_id = b.user_id AND a.spotify_id = b.spotify_id AND a.sync_type = b.sync_type;
+
         -- Ensure synced_tracks has the correct unique constraint
         IF NOT EXISTS (
           SELECT 1 FROM pg_constraint
-          WHERE conname = 'synced_tracks_user_id_spotify_id_sync_type_key'
+          WHERE conname = 'synced_tracks_user_id_spotify_id_sync_type_key' AND conrelid = 'synced_tracks'::regclass
         ) THEN
           ALTER TABLE synced_tracks ADD CONSTRAINT synced_tracks_user_id_spotify_id_sync_type_key UNIQUE (user_id, spotify_id, sync_type);
         END IF;
 
+        -- Deduplicate sync_progress before adding constraint
+        DELETE FROM sync_progress a USING sync_progress b
+        WHERE a.id > b.id AND a.user_id = b.user_id AND a.sync_type = b.sync_type;
+
         -- Ensure sync_progress has the correct unique constraint
         IF NOT EXISTS (
           SELECT 1 FROM pg_constraint
-          WHERE conname = 'sync_progress_user_id_sync_type_key'
+          WHERE conname = 'sync_progress_user_id_sync_type_key' AND conrelid = 'sync_progress'::regclass
         ) THEN
           ALTER TABLE sync_progress ADD CONSTRAINT sync_progress_user_id_sync_type_key UNIQUE (user_id, sync_type);
         END IF;
 
+        -- Deduplicate unmatched_tracks before adding constraint
+        DELETE FROM unmatched_tracks a USING unmatched_tracks b
+        WHERE a.id > b.id AND a.user_id = b.user_id AND a.spotify_id = b.spotify_id AND a.sync_type = b.sync_type;
+
         -- Ensure unmatched_tracks has the correct unique constraint
         IF NOT EXISTS (
           SELECT 1 FROM pg_constraint
-          WHERE conname = 'unmatched_tracks_user_id_spotify_id_sync_type_key'
+          WHERE conname = 'unmatched_tracks_user_id_spotify_id_sync_type_key' AND conrelid = 'unmatched_tracks'::regclass
         ) THEN
           ALTER TABLE unmatched_tracks ADD CONSTRAINT unmatched_tracks_user_id_spotify_id_sync_type_key UNIQUE (user_id, spotify_id, sync_type);
         END IF;
