@@ -42,7 +42,7 @@ export function createAuthRoutes(storage: Storage): Hono {
 
     if (error) {
       logger.error(`Spotify OAuth error: ${error}`);
-      return c.redirect(`/?error=spotify_auth_failed&message=${error}`);
+      return c.redirect(`/?error=spotify_auth_failed&message=${encodeURIComponent(error)}`);
     }
 
     if (!code || !state) {
@@ -100,7 +100,7 @@ export function createAuthRoutes(storage: Storage): Hono {
       <div class="bg-blue-900/30 border border-blue-600/50 rounded-lg p-4 mb-6">
         <h2 class="font-semibold text-blue-400 mb-2">How to get your Qobuz token:</h2>
         <ol class="text-sm text-gray-300 space-y-2 list-decimal list-inside">
-          <li>Go to <a href="https://play.qobuz.com" target="_blank" class="text-blue-400 hover:underline">play.qobuz.com</a> and log in</li>
+          <li>Go to <a href="https://play.qobuz.com" target="_blank" rel="noopener noreferrer" class="text-blue-400 hover:underline">play.qobuz.com</a> and log in</li>
           <li>Open DevTools (F12 or Cmd+Option+I)</li>
           <li>Go to Application > Cookies > qobuz.com</li>
           <li>Find the cookie named <code class="bg-gray-700 px-1 rounded">x-user-auth-token</code> or check Network requests for the header</li>

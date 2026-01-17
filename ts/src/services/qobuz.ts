@@ -193,13 +193,17 @@ export class QobuzClient {
             throw new Error(`Qobuz API error: ${response.status}`);
           }
 
-          // Server error - retry
+          // Server error - retry if we have attempts left
           if (attempt < maxRetries) {
             logger.warn(`Server error on ${endpoint} (attempt ${attempt + 1}): ${response.status}`);
             await new Promise(resolve => setTimeout(resolve, delay * 1000));
             delay *= 2;
             continue;
           }
+
+          // Final attempt also failed with server error
+          logger.error(`Server error on ${endpoint} after ${maxRetries + 1} attempts: ${response.status}`);
+          throw new Error(`Qobuz API server error: ${response.status}`);
         }
 
         this.rateLimiter.onSuccess();

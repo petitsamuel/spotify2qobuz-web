@@ -21,6 +21,23 @@ const activeTasks = new Map<string, {
   service?: AsyncSyncService;
 }>();
 
+// Task cleanup delay (5 minutes) - keeps task in memory briefly for status queries
+const TASK_CLEANUP_DELAY_MS = 5 * 60 * 1000;
+
+/**
+ * Schedule cleanup of a completed/failed/cancelled task from memory.
+ * Keeps task available for a short time for status queries, then removes it.
+ */
+function scheduleTaskCleanup(taskId: string): void {
+  setTimeout(() => {
+    const task = activeTasks.get(taskId);
+    if (task && ['completed', 'failed', 'cancelled'].includes(task.status)) {
+      activeTasks.delete(taskId);
+      logger.debug(`Cleaned up task ${taskId} from memory`);
+    }
+  }, TASK_CLEANUP_DELAY_MS);
+}
+
 export function createSyncRoutes(storage: Storage): Hono {
   const app = new Hono();
 
@@ -115,7 +132,7 @@ export function createSyncRoutes(storage: Storage): Hono {
   });
 
   // Cancel sync
-  app.post('/cancel/:taskId', (c) => {
+  app.post('/cancel/:taskId', async (c) => {
     const taskId = c.req.param('taskId');
     const task = activeTasks.get(taskId);
 
@@ -128,6 +145,12 @@ export function createSyncRoutes(storage: Storage): Hono {
     }
     task.status = 'cancelled';
 
+    // Persist cancellation to storage
+    await storage.updateTask(taskId, 'cancelled');
+
+    // Schedule cleanup
+    scheduleTaskCleanup(taskId);
+
     return c.json({ status: 'cancelled' });
   });
 
@@ -139,8 +162,11 @@ export function createSyncRoutes(storage: Storage): Hono {
     c.header('Cache-Control', 'no-cache');
     c.header('Connection', 'keep-alive');
 
+    // Track interval for cleanup
+    let interval: ReturnType<typeof setInterval> | null = null;
+
     const stream = new ReadableStream({
-      async start(controller) {
+      start(controller) {
         const encoder = new TextEncoder();
 
         const sendProgress = () => {
@@ -172,11 +198,19 @@ export function createSyncRoutes(storage: Storage): Hono {
         if (!sendProgress()) return;
 
         // Poll for updates
-        const interval = setInterval(() => {
+        interval = setInterval(() => {
           if (!sendProgress()) {
-            clearInterval(interval);
+            if (interval) clearInterval(interval);
+            interval = null;
           }
         }, 500);
+      },
+      cancel() {
+        // Clean up interval when client disconnects
+        if (interval) {
+          clearInterval(interval);
+          interval = null;
+        }
       },
     });
 
@@ -285,6 +319,9 @@ async function runSync(
 
     await storage.updateTask(taskId, 'completed', task.progress as unknown as Record<string, unknown>);
 
+    // Schedule cleanup of task from memory
+    scheduleTaskCleanup(taskId);
+
     logger.info(`Sync completed: ${taskId}`);
   } catch (error) {
     task.status = 'failed';
@@ -297,6 +334,10 @@ async function runSync(
     });
 
     await storage.updateTask(taskId, 'failed');
+
+    // Schedule cleanup of task from memory
+    scheduleTaskCleanup(taskId);
+
     logger.error(`Sync failed: ${error}`);
   }
 }
