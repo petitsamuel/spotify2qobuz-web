@@ -188,6 +188,124 @@ const migrations: Migration[] = [
       END $$;
     `,
   },
+  {
+    version: 4,
+    name: 'add_user_id_to_legacy_tables',
+    up: `
+      -- Add user_id column to tables that were created before multi-user support
+      -- This migration handles databases that existed before user_id was added
+
+      DO $$
+      BEGIN
+        -- Add user_id to credentials if it doesn't exist
+        IF NOT EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_name = 'credentials' AND column_name = 'user_id'
+        ) THEN
+          ALTER TABLE credentials ADD COLUMN user_id TEXT NOT NULL DEFAULT 'legacy_user';
+          -- Drop old unique constraint on service only (if exists)
+          IF EXISTS (
+            SELECT 1 FROM pg_constraint WHERE conname = 'credentials_service_key'
+          ) THEN
+            ALTER TABLE credentials DROP CONSTRAINT credentials_service_key;
+          END IF;
+          -- Add new unique constraint on (user_id, service)
+          IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint WHERE conname = 'credentials_user_id_service_key'
+          ) THEN
+            ALTER TABLE credentials ADD CONSTRAINT credentials_user_id_service_key UNIQUE (user_id, service);
+          END IF;
+        END IF;
+
+        -- Add user_id to migrations table if it doesn't exist
+        IF NOT EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_name = 'migrations' AND column_name = 'user_id'
+        ) THEN
+          ALTER TABLE migrations ADD COLUMN user_id TEXT NOT NULL DEFAULT 'legacy_user';
+        END IF;
+
+        -- Add user_id to sync_tasks if it doesn't exist
+        IF NOT EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_name = 'sync_tasks' AND column_name = 'user_id'
+        ) THEN
+          ALTER TABLE sync_tasks ADD COLUMN user_id TEXT NOT NULL DEFAULT 'legacy_user';
+        END IF;
+
+        -- Add user_id to synced_tracks if it doesn't exist
+        IF NOT EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_name = 'synced_tracks' AND column_name = 'user_id'
+        ) THEN
+          ALTER TABLE synced_tracks ADD COLUMN user_id TEXT NOT NULL DEFAULT 'legacy_user';
+          -- Drop old unique constraint on (spotify_id) only if it exists
+          IF EXISTS (
+            SELECT 1 FROM pg_constraint WHERE conname = 'synced_tracks_spotify_id_key'
+          ) THEN
+            ALTER TABLE synced_tracks DROP CONSTRAINT synced_tracks_spotify_id_key;
+          END IF;
+          -- Add new unique constraint (will be handled by migration v2 if needed)
+        END IF;
+
+        -- Add user_id to sync_progress if it doesn't exist
+        IF NOT EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_name = 'sync_progress' AND column_name = 'user_id'
+        ) THEN
+          ALTER TABLE sync_progress ADD COLUMN user_id TEXT NOT NULL DEFAULT 'legacy_user';
+          -- Drop old unique constraint on (sync_type) only if it exists
+          IF EXISTS (
+            SELECT 1 FROM pg_constraint WHERE conname = 'sync_progress_sync_type_key'
+          ) THEN
+            ALTER TABLE sync_progress DROP CONSTRAINT sync_progress_sync_type_key;
+          END IF;
+          -- Add new unique constraint
+          IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint WHERE conname = 'sync_progress_user_id_sync_type_key'
+          ) THEN
+            ALTER TABLE sync_progress ADD CONSTRAINT sync_progress_user_id_sync_type_key UNIQUE (user_id, sync_type);
+          END IF;
+        END IF;
+
+        -- Add user_id to unmatched_tracks if it doesn't exist
+        IF NOT EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_name = 'unmatched_tracks' AND column_name = 'user_id'
+        ) THEN
+          ALTER TABLE unmatched_tracks ADD COLUMN user_id TEXT NOT NULL DEFAULT 'legacy_user';
+          -- Drop old unique constraint on (spotify_id, sync_type) only if it exists
+          IF EXISTS (
+            SELECT 1 FROM pg_constraint WHERE conname = 'unmatched_tracks_spotify_id_sync_type_key'
+          ) THEN
+            ALTER TABLE unmatched_tracks DROP CONSTRAINT unmatched_tracks_spotify_id_sync_type_key;
+          END IF;
+          -- Add new unique constraint
+          IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint WHERE conname = 'unmatched_tracks_user_id_spotify_id_sync_type_key'
+          ) THEN
+            ALTER TABLE unmatched_tracks ADD CONSTRAINT unmatched_tracks_user_id_spotify_id_sync_type_key UNIQUE (user_id, spotify_id, sync_type);
+          END IF;
+        END IF;
+
+        -- Add user_id to active_tasks if it doesn't exist
+        IF NOT EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_name = 'active_tasks' AND column_name = 'user_id'
+        ) THEN
+          ALTER TABLE active_tasks ADD COLUMN user_id TEXT NOT NULL DEFAULT 'legacy_user';
+        END IF;
+      END $$;
+
+      -- Create indexes (these will be created by initDb but adding here for completeness)
+      CREATE INDEX IF NOT EXISTS idx_credentials_user ON credentials(user_id);
+      CREATE INDEX IF NOT EXISTS idx_migrations_user ON migrations(user_id);
+      CREATE INDEX IF NOT EXISTS idx_sync_tasks_user ON sync_tasks(user_id);
+      CREATE INDEX IF NOT EXISTS idx_synced_tracks_user ON synced_tracks(user_id);
+      CREATE INDEX IF NOT EXISTS idx_unmatched_user ON unmatched_tracks(user_id);
+      CREATE INDEX IF NOT EXISTS idx_active_tasks_user ON active_tasks(user_id);
+    `,
+  },
 ];
 
 /**
