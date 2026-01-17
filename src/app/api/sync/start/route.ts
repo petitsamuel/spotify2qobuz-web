@@ -1,5 +1,6 @@
 /**
  * Start sync API route.
+ * Uses chunked sync to avoid Vercel timeout limits.
  */
 
 import { NextRequest } from 'next/server';
@@ -11,6 +12,9 @@ import { Storage } from '@/lib/db/storage';
 import { SpotifyClient } from '@/lib/services/spotify';
 import { QobuzClient } from '@/lib/services/qobuz';
 import type { SyncProgress } from '@/lib/types';
+
+// How many items to process per chunk (tuned for ~30s execution time)
+const CHUNK_SIZE = 50;
 
 export async function POST(request: NextRequest) {
   const userId = await getCurrentUserId();
@@ -114,36 +118,99 @@ async function runSync(
       await storage.markTrackSynced(userId, spotifyId, qobuzId, syncType);
     };
 
-    let report;
+    // For favorites and albums, use chunked sync
+    if (syncType === 'favorites' || syncType === 'albums') {
+      let chunkResult;
 
-    if (syncType === 'favorites') {
-      report = await syncService.syncFavorites(dryRun, alreadySynced, onItemSynced);
-      for (const track of report.missing_tracks) {
-        await storage.saveUnmatchedTrack(
-          userId,
-          track.spotify_id,
-          track.title,
-          track.artist,
-          track.album,
-          syncType,
-          track.suggestions as unknown as Array<Record<string, unknown>>
-        );
+      if (syncType === 'favorites') {
+        chunkResult = await syncService.syncFavoritesChunk(0, CHUNK_SIZE, dryRun, alreadySynced, onItemSynced);
+
+        // Save unmatched tracks from this chunk
+        const partialReport = chunkResult.partialReport;
+        if ('missing_tracks' in partialReport && partialReport.missing_tracks) {
+          for (const track of partialReport.missing_tracks) {
+            await storage.saveUnmatchedTrack(
+              userId,
+              track.spotify_id,
+              track.title,
+              track.artist,
+              track.album,
+              syncType,
+              track.suggestions as unknown as Array<Record<string, unknown>>
+            );
+          }
+        }
+      } else {
+        chunkResult = await syncService.syncAlbumsChunk(0, CHUNK_SIZE, dryRun, alreadySynced, onItemSynced);
+
+        // Save unmatched albums from this chunk
+        const partialReport = chunkResult.partialReport;
+        if ('missing_albums' in partialReport && partialReport.missing_albums) {
+          for (const album of partialReport.missing_albums) {
+            await storage.saveUnmatchedTrack(
+              userId,
+              album.spotify_id,
+              album.title,
+              album.artist,
+              '',
+              syncType,
+              album.suggestions as unknown as Array<Record<string, unknown>>
+            );
+          }
+        }
       }
-    } else if (syncType === 'albums') {
-      report = await syncService.syncAlbums(dryRun, alreadySynced, onItemSynced);
-      for (const album of report.missing_albums) {
-        await storage.saveUnmatchedTrack(
-          userId,
-          album.spotify_id,
-          album.title,
-          album.artist,
-          '',
-          syncType,
-          album.suggestions as unknown as Array<Record<string, unknown>>
+
+      // Check if there are more items to process
+      if (chunkResult.hasMore) {
+        // Save chunk state for next continuation
+        const chunkState = {
+          offset: chunkResult.nextOffset,
+          totalItems: chunkResult.totalItems,
+          processedInChunk: chunkResult.processedInChunk,
+          hasMore: true,
+        };
+
+        await storage.updateActiveTask(
+          taskId,
+          'chunk_complete',
+          undefined,
+          undefined,
+          chunkResult.partialReport as unknown as Record<string, unknown>,
+          chunkState
         );
+        await storage.updateTask(taskId, 'chunk_complete');
+
+        // Also save to sync_progress for resumability
+        await storage.saveSyncProgress(userId, syncType, chunkResult.nextOffset, chunkResult.totalItems);
+
+        logger.info(`First chunk completed, more to go: ${taskId} (next offset: ${chunkResult.nextOffset})`);
+      } else {
+        // All done in the first chunk! Update migration and mark as completed
+        await storage.updateMigration(migrationId, {
+          completed_at: new Date().toISOString(),
+          status: 'completed',
+          tracks_matched: 'tracks_matched' in chunkResult.partialReport ? chunkResult.partialReport.tracks_matched ?? 0 : 0,
+          tracks_not_matched: 'tracks_not_matched' in chunkResult.partialReport ? chunkResult.partialReport.tracks_not_matched ?? 0 : 0,
+          isrc_matches: 'isrc_matches' in chunkResult.partialReport ? chunkResult.partialReport.isrc_matches ?? 0 : 0,
+          fuzzy_matches: chunkResult.partialReport.fuzzy_matches ?? 0,
+          report_json: JSON.stringify(chunkResult.partialReport),
+        });
+
+        await storage.updateActiveTask(
+          taskId,
+          'completed',
+          undefined,
+          undefined,
+          chunkResult.partialReport as unknown as Record<string, unknown>,
+          { offset: chunkResult.nextOffset, totalItems: chunkResult.totalItems, processedInChunk: 0, hasMore: false }
+        );
+        await storage.updateTask(taskId, 'completed');
+
+        logger.info(`Sync completed in first chunk: ${taskId}`);
       }
     } else {
-      report = await syncService.syncPlaylists(undefined, dryRun);
+      // Playlists use full sync (no chunking yet)
+      const report = await syncService.syncPlaylists(undefined, dryRun);
       for (const track of report.missing_tracks) {
         await storage.saveUnmatchedTrack(
           userId,
@@ -155,23 +222,23 @@ async function runSync(
           track.suggestions as unknown as Array<Record<string, unknown>>
         );
       }
+
+      // Update migration record
+      await storage.updateMigration(migrationId, {
+        completed_at: new Date().toISOString(),
+        status: 'completed',
+        tracks_matched: report.tracks_matched,
+        tracks_not_matched: report.tracks_not_matched,
+        isrc_matches: report.isrc_matches,
+        fuzzy_matches: report.fuzzy_matches,
+        report_json: JSON.stringify(report),
+      });
+
+      await storage.updateActiveTask(taskId, 'completed', undefined, undefined, report as unknown as Record<string, unknown>);
+      await storage.updateTask(taskId, 'completed');
+
+      logger.info(`Sync completed: ${taskId}`);
     }
-
-    // Update migration record
-    await storage.updateMigration(migrationId, {
-      completed_at: new Date().toISOString(),
-      status: 'completed',
-      tracks_matched: 'tracks_matched' in report ? report.tracks_matched : report.albums_matched,
-      tracks_not_matched: 'tracks_not_matched' in report ? report.tracks_not_matched : report.albums_not_matched,
-      isrc_matches: 'isrc_matches' in report ? report.isrc_matches : report.upc_matches,
-      fuzzy_matches: report.fuzzy_matches,
-      report_json: JSON.stringify(report),
-    });
-
-    await storage.updateActiveTask(taskId, 'completed', undefined, undefined, report as unknown as Record<string, unknown>);
-    await storage.updateTask(taskId, 'completed');
-
-    logger.info(`Sync completed: ${taskId}`);
   } catch (error) {
     await storage.updateMigration(migrationId, {
       completed_at: new Date().toISOString(),

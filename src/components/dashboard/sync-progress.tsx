@@ -33,6 +33,13 @@ interface SyncReport {
   fuzzy_matches?: number;
 }
 
+interface ChunkState {
+  offset: number;
+  totalItems: number;
+  processedInChunk: number;
+  hasMore: boolean;
+}
+
 interface SyncProgressProps {
   taskId: string;
   syncType: string;
@@ -48,8 +55,37 @@ export function SyncProgress({ taskId, syncType, onComplete }: SyncProgressProps
   const [report, setReport] = useState<SyncReport | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [connectionError, setConnectionError] = useState<boolean>(false);
+  const [chunkState, setChunkState] = useState<ChunkState | null>(null);
+  const [isContinuing, setIsContinuing] = useState<boolean>(false);
   const retryCountRef = useRef(0);
   const maxRetries = 3;
+
+  // Continue the sync when a chunk completes
+  const continueSync = useCallback(async (): Promise<boolean> => {
+    if (isContinuing) return true; // Avoid duplicate calls
+
+    setIsContinuing(true);
+    try {
+      const response = await fetch(`/api/sync/continue/${taskId}`, { method: 'POST' });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        console.error('Failed to continue sync:', errorData);
+        setError(errorData.error || `Failed to continue sync: HTTP ${response.status}`);
+        return false;
+      }
+
+      // Sync continuation started, continue polling
+      setStatus('running');
+      return true;
+    } catch (err) {
+      console.error('Failed to continue sync:', err);
+      setError('Failed to continue sync. Please try again.');
+      return false;
+    } finally {
+      setIsContinuing(false);
+    }
+  }, [taskId, isContinuing]);
 
   const fetchProgress = useCallback(async (): Promise<boolean> => {
     try {
@@ -79,6 +115,16 @@ export function SyncProgress({ taskId, syncType, onComplete }: SyncProgressProps
       if (data.error) {
         setError(data.error);
       }
+      if (data.chunk_state) {
+        setChunkState(data.chunk_state);
+      }
+
+      // Handle chunk_complete status - automatically continue
+      if (data.status === 'chunk_complete' && !isContinuing) {
+        // Trigger continuation and continue polling
+        continueSync();
+        return true;
+      }
 
       // Return false to stop polling when task is complete
       if (['completed', 'failed', 'cancelled'].includes(data.status)) {
@@ -98,7 +144,7 @@ export function SyncProgress({ taskId, syncType, onComplete }: SyncProgressProps
 
       return true; // Continue polling to retry
     }
-  }, [taskId]);
+  }, [taskId, isContinuing, continueSync]);
 
   useEffect(() => {
     let intervalId: ReturnType<typeof setInterval> | null = null;
@@ -139,17 +185,22 @@ export function SyncProgress({ taskId, syncType, onComplete }: SyncProgressProps
     await fetch(`/api/sync/cancel/${taskId}`, { method: 'POST' });
   };
 
-  const handleRetry = () => {
+  const handleRetry = async () => {
     retryCountRef.current = 0;
     setConnectionError(false);
     setError(null);
-    fetchProgress();
+    try {
+      await fetchProgress();
+    } catch (err) {
+      console.error('Retry failed:', err);
+    }
   };
 
-  const isActive = ['starting', 'running'].includes(status) && !connectionError;
+  const isActive = ['starting', 'running', 'chunk_complete'].includes(status) && !connectionError;
   const isComplete = status === 'completed';
   const isFailed = status === 'failed';
   const isCancelled = status === 'cancelled';
+  const isChunkComplete = status === 'chunk_complete';
 
   return (
     <Card>
@@ -162,14 +213,19 @@ export function SyncProgress({ taskId, syncType, onComplete }: SyncProgressProps
             </CardDescription>
           </div>
           <Badge variant={isComplete ? 'default' : isFailed ? 'destructive' : 'secondary'}>
-            {status}
+            {isChunkComplete ? 'continuing...' : status}
           </Badge>
         </div>
       </CardHeader>
       <CardContent className="space-y-4">
         {isActive && (
           <>
-            <Progress value={progress.percent_complete ?? 0} />
+            <Progress value={chunkState ? (chunkState.offset / chunkState.totalItems) * 100 : progress.percent_complete ?? 0} />
+            {chunkState && chunkState.totalItems > 0 && (
+              <div className="text-xs text-muted-foreground">
+                Overall: {chunkState.offset} / {chunkState.totalItems} items
+              </div>
+            )}
             <div className="grid grid-cols-2 gap-4 text-sm">
               {progress.current_playlist && (
                 <div className="col-span-2">

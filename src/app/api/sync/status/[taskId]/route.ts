@@ -28,18 +28,30 @@ export async function GET(
         return jsonError('Task not found', 404);
       }
 
-      return Response.json({
+      const response: Record<string, unknown> = {
         task_id: taskId,
         status: activeTask.status,
         progress: activeTask.progress,
         report: activeTask.report,
         error: activeTask.error,
-      });
+      };
+
+      // Include chunk state for chunk_complete status
+      if (activeTask.status === 'chunk_complete' && activeTask.chunkState) {
+        response.chunk_state = activeTask.chunkState;
+      }
+
+      return Response.json(response);
     }
 
-    // Fall back to database task (note: sync_tasks doesn't have user ownership check yet)
+    // Fall back to database task with user ownership check
     const dbTask = await storage.getTask(taskId);
     if (dbTask) {
+      // Verify task belongs to current user
+      if (dbTask.user_id !== userId) {
+        return jsonError('Task not found', 404);
+      }
+
       return Response.json({
         task_id: taskId,
         status: dbTask.status,

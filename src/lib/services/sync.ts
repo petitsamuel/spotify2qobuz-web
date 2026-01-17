@@ -10,7 +10,7 @@ import { logger } from '../logger';
 import { SpotifyClient, SpotifyTrack, SpotifyAlbum } from './spotify';
 import { QobuzClient, QobuzAlbum } from './qobuz';
 import { TrackMatcher, Suggestion, bestFuzzyScore } from './matcher';
-import type { SyncProgress, SyncReport, AlbumSyncReport, MissingTrack } from '../types';
+import type { SyncProgress, SyncReport, AlbumSyncReport, MissingTrack, ChunkResult } from '../types';
 
 /**
  * Comprehensive album edition normalization.
@@ -736,6 +736,353 @@ export class AsyncSyncService {
     }
 
     return report;
+  }
+
+  /**
+   * Sync a chunk of saved tracks from Spotify to Qobuz favorites.
+   * Processes up to chunkSize items starting from the given offset.
+   * Returns a ChunkResult indicating if there are more items to process.
+   */
+  async syncFavoritesChunk(
+    offset: number,
+    chunkSize: number = 50,
+    dryRun: boolean = false,
+    alreadySynced: Set<string> = new Set(),
+    onTrackSynced?: TrackSyncedCallback
+  ): Promise<ChunkResult> {
+    const partialReport: Partial<SyncReport> = {
+      started_at: new Date().toISOString(),
+      completed_at: null,
+      tracks_matched: 0,
+      tracks_not_matched: 0,
+      tracks_skipped: 0,
+      tracks_already_in_qobuz: 0,
+      isrc_matches: 0,
+      fuzzy_matches: 0,
+      missing_tracks: [],
+      synced_tracks: [],
+      errors: [],
+    };
+
+    let processedInChunk = 0;
+    let totalItems = 0;
+    let nextOffset = offset;
+
+    try {
+      // Pre-fetch Qobuz favorites with ISRCs
+      logger.info(`Pre-fetching Qobuz favorites for chunk starting at ${offset}...`);
+      const qobuzIsrcMap = await this.qobuzClient.getFavoriteTracksWithIsrc();
+      const existingFavorites = new Set(qobuzIsrcMap.values());
+
+      this.progress.update({
+        total_playlists: 1,
+        current_playlist: 'Saved Tracks',
+        current_playlist_index: 1,
+      });
+
+      const pendingFavorites: Array<{ spotify_id: string; qobuz_id: number }> = [];
+
+      const flushFavorites = async () => {
+        if (pendingFavorites.length > 0 && !dryRun) {
+          const trackIds = pendingFavorites.map(f => f.qobuz_id);
+          const currentBatch = [...pendingFavorites];
+
+          try {
+            await this.qobuzClient.addFavoriteTracksBatch(trackIds);
+            for (const f of currentBatch) {
+              if (onTrackSynced) {
+                onTrackSynced(f.spotify_id, String(f.qobuz_id));
+              }
+            }
+          } catch (error) {
+            logger.error(`Failed to add ${trackIds.length} tracks to Qobuz favorites: ${error}`);
+            partialReport.errors!.push(`Failed to add batch of ${trackIds.length} tracks to Qobuz: ${error}`);
+          }
+
+          pendingFavorites.length = 0;
+        }
+      };
+
+      // Stream tracks from Spotify starting at offset
+      for await (const { track, spotifyId, total } of this.spotifyClient.iterSavedTracks(offset)) {
+        if (await this.isCancelled()) {
+          logger.info('Chunk sync cancelled by user');
+          partialReport.errors!.push('Cancelled by user');
+          break;
+        }
+
+        totalItems = total;
+
+        // Check if we've processed enough for this chunk
+        if (processedInChunk >= chunkSize) {
+          break;
+        }
+
+        nextOffset++;
+        processedInChunk++;
+
+        this.progress.update({
+          total_tracks: total,
+          current_track_index: nextOffset,
+        });
+
+        // Skip already synced
+        if (alreadySynced.has(spotifyId)) {
+          partialReport.tracks_skipped!++;
+          continue;
+        }
+
+        // Fast path: check if ISRC already exists in Qobuz favorites
+        if (track.isrc && qobuzIsrcMap.has(track.isrc)) {
+          partialReport.tracks_already_in_qobuz!++;
+          partialReport.tracks_matched!++;
+          partialReport.isrc_matches!++;
+          this.progress.update({
+            tracks_matched: this.progress.tracks_matched + 1,
+            isrc_matches: this.progress.isrc_matches + 1,
+          });
+          continue;
+        }
+
+        // Match track
+        const [matchResult, suggestions] = await this.matcher.matchTrackWithSuggestions(track);
+
+        if (matchResult) {
+          partialReport.tracks_matched!++;
+          this.progress.update({ tracks_matched: this.progress.tracks_matched + 1 });
+
+          if (matchResult.matchType === 'isrc') {
+            partialReport.isrc_matches!++;
+            this.progress.update({ isrc_matches: this.progress.isrc_matches + 1 });
+          } else {
+            partialReport.fuzzy_matches!++;
+            this.progress.update({ fuzzy_matches: this.progress.fuzzy_matches + 1 });
+          }
+
+          const qobuzTrackId = matchResult.qobuzTrack.id;
+
+          if (!existingFavorites.has(qobuzTrackId)) {
+            pendingFavorites.push({ spotify_id: spotifyId, qobuz_id: qobuzTrackId });
+            existingFavorites.add(qobuzTrackId);
+          }
+
+          partialReport.synced_tracks!.push({ spotify_id: spotifyId, qobuz_id: String(qobuzTrackId) });
+        } else {
+          partialReport.tracks_not_matched!++;
+          this.progress.update({ tracks_not_matched: this.progress.tracks_not_matched + 1 });
+
+          const missingTrack: MissingTrack = {
+            spotify_id: spotifyId,
+            title: track.title,
+            artist: track.artist,
+            album: track.album,
+            suggestions,
+          };
+          partialReport.missing_tracks!.push(missingTrack);
+          this.progress.addMissingTrack(missingTrack);
+          this.progress.update({});
+        }
+
+        // Flush favorites in batches
+        if (pendingFavorites.length >= FAVORITE_BATCH_SIZE) {
+          await flushFavorites();
+        }
+      }
+
+      // Flush remaining
+      await flushFavorites();
+
+      partialReport.completed_at = new Date().toISOString();
+    } catch (error) {
+      logger.error(`Favorites chunk sync failed: ${error}`);
+      partialReport.errors!.push(String(error));
+      partialReport.completed_at = new Date().toISOString();
+    }
+
+    const hasMore = nextOffset < totalItems;
+    logger.info(`Chunk complete: processed ${processedInChunk}, nextOffset=${nextOffset}, total=${totalItems}, hasMore=${hasMore}`);
+
+    return {
+      hasMore,
+      nextOffset,
+      totalItems,
+      processedInChunk,
+      partialReport,
+    };
+  }
+
+  /**
+   * Sync a chunk of saved albums from Spotify to Qobuz favorites.
+   * Processes up to chunkSize items starting from the given offset.
+   * Returns a ChunkResult indicating if there are more items to process.
+   */
+  async syncAlbumsChunk(
+    offset: number,
+    chunkSize: number = 50,
+    dryRun: boolean = false,
+    alreadySynced: Set<string> = new Set(),
+    onAlbumSynced?: TrackSyncedCallback
+  ): Promise<ChunkResult> {
+    const partialReport: Partial<AlbumSyncReport> = {
+      started_at: new Date().toISOString(),
+      completed_at: null,
+      albums_matched: 0,
+      albums_not_matched: 0,
+      albums_skipped: 0,
+      albums_already_in_qobuz: 0,
+      upc_matches: 0,
+      fuzzy_matches: 0,
+      missing_albums: [],
+      synced_albums: [],
+      errors: [],
+    };
+
+    let processedInChunk = 0;
+    let totalItems = 0;
+    let nextOffset = offset;
+
+    try {
+      // Pre-fetch Qobuz favorite albums with UPCs
+      logger.info(`Pre-fetching Qobuz favorite albums for chunk starting at ${offset}...`);
+      const qobuzUpcMap = await this.qobuzClient.getFavoriteAlbumsWithUpc();
+      const existingFavorites = new Set(qobuzUpcMap.values());
+
+      this.progress.update({
+        total_playlists: 1,
+        current_playlist: 'Saved Albums',
+        current_playlist_index: 1,
+      });
+
+      const pendingFavorites: Array<{ spotify_id: string; qobuz_id: string }> = [];
+
+      const flushAlbums = async () => {
+        if (pendingFavorites.length > 0 && !dryRun) {
+          const albumIds = pendingFavorites.map(f => f.qobuz_id);
+          const currentBatch = [...pendingFavorites];
+
+          try {
+            await this.qobuzClient.addFavoriteAlbumsBatch(albumIds);
+            for (const f of currentBatch) {
+              if (onAlbumSynced) {
+                onAlbumSynced(f.spotify_id, f.qobuz_id);
+              }
+            }
+          } catch (error) {
+            logger.error(`Failed to add ${albumIds.length} albums to Qobuz favorites: ${error}`);
+            partialReport.errors!.push(`Failed to add batch of ${albumIds.length} albums to Qobuz: ${error}`);
+          }
+
+          pendingFavorites.length = 0;
+        }
+      };
+
+      // Stream albums from Spotify starting at offset
+      for await (const { album, spotifyId, total } of this.spotifyClient.iterSavedAlbums(offset)) {
+        if (await this.isCancelled()) {
+          logger.info('Album chunk sync cancelled by user');
+          partialReport.errors!.push('Cancelled by user');
+          break;
+        }
+
+        totalItems = total;
+
+        // Check if we've processed enough for this chunk
+        if (processedInChunk >= chunkSize) {
+          break;
+        }
+
+        nextOffset++;
+        processedInChunk++;
+
+        this.progress.update({
+          total_tracks: total,
+          current_track_index: nextOffset,
+        });
+
+        // Skip already synced
+        if (alreadySynced.has(spotifyId)) {
+          partialReport.albums_skipped!++;
+          continue;
+        }
+
+        // Fast path: check if UPC already exists in Qobuz favorites
+        if (album.upc && qobuzUpcMap.has(album.upc)) {
+          partialReport.albums_already_in_qobuz!++;
+          partialReport.albums_matched!++;
+          partialReport.upc_matches!++;
+          this.progress.update({
+            tracks_matched: this.progress.tracks_matched + 1,
+            isrc_matches: this.progress.isrc_matches + 1,
+          });
+          continue;
+        }
+
+        // Match album
+        const matchResult = await this.matchAlbum(album, qobuzUpcMap, existingFavorites);
+
+        if (matchResult) {
+          partialReport.albums_matched!++;
+          this.progress.update({ tracks_matched: this.progress.tracks_matched + 1 });
+
+          if (matchResult.matchType === 'upc') {
+            partialReport.upc_matches!++;
+            this.progress.update({ isrc_matches: this.progress.isrc_matches + 1 });
+          } else {
+            partialReport.fuzzy_matches!++;
+            this.progress.update({ fuzzy_matches: this.progress.fuzzy_matches + 1 });
+          }
+
+          if (!existingFavorites.has(matchResult.qobuzId)) {
+            pendingFavorites.push({ spotify_id: spotifyId, qobuz_id: matchResult.qobuzId });
+            existingFavorites.add(matchResult.qobuzId);
+          }
+
+          partialReport.synced_albums!.push({ spotify_id: spotifyId, qobuz_id: matchResult.qobuzId });
+        } else {
+          partialReport.albums_not_matched!++;
+          this.progress.update({ tracks_not_matched: this.progress.tracks_not_matched + 1 });
+
+          // Get suggestions
+          const suggestions = await this.getAlbumSuggestions(album);
+
+          const missingAlbum: MissingTrack = {
+            spotify_id: spotifyId,
+            title: album.title,
+            artist: album.artist,
+            album: '',
+            suggestions,
+          };
+          partialReport.missing_albums!.push(missingAlbum);
+          this.progress.addMissingTrack(missingAlbum);
+          this.progress.update({});
+        }
+
+        // Flush favorites in batches
+        if (pendingFavorites.length >= FAVORITE_BATCH_SIZE) {
+          await flushAlbums();
+        }
+      }
+
+      // Flush remaining
+      await flushAlbums();
+
+      partialReport.completed_at = new Date().toISOString();
+    } catch (error) {
+      logger.error(`Album chunk sync failed: ${error}`);
+      partialReport.errors!.push(String(error));
+      partialReport.completed_at = new Date().toISOString();
+    }
+
+    const hasMore = nextOffset < totalItems;
+    logger.info(`Album chunk complete: processed ${processedInChunk}, nextOffset=${nextOffset}, total=${totalItems}, hasMore=${hasMore}`);
+
+    return {
+      hasMore,
+      nextOffset,
+      totalItems,
+      processedInChunk,
+      partialReport,
+    };
   }
 
   private async matchAlbum(

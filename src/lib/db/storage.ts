@@ -146,7 +146,7 @@ export class Storage {
       )
     `;
 
-    // Synced tracks keyed by (user_id, spotify_id) for multi-user support
+    // Synced tracks keyed by (user_id, spotify_id, sync_type) for multi-user support
     await this.sql`
       CREATE TABLE IF NOT EXISTS synced_tracks (
         id SERIAL PRIMARY KEY,
@@ -155,7 +155,7 @@ export class Storage {
         qobuz_id TEXT,
         sync_type TEXT NOT NULL,
         synced_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        UNIQUE(user_id, spotify_id)
+        UNIQUE(user_id, spotify_id, sync_type)
       )
     `;
 
@@ -213,9 +213,18 @@ export class Storage {
         progress_json TEXT,
         error TEXT,
         report_json TEXT,
+        chunk_state_json TEXT,
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )
+    `;
+
+    // Add chunk_state_json column if it doesn't exist (for existing deployments)
+    await this.sql`
+      DO $$ BEGIN
+        ALTER TABLE active_tasks ADD COLUMN IF NOT EXISTS chunk_state_json TEXT;
+      EXCEPTION WHEN duplicate_column THEN NULL;
+      END $$;
     `;
 
     // Create indexes for performance
@@ -426,11 +435,13 @@ export class Storage {
     status: string,
     progress?: Record<string, unknown>,
     error?: string,
-    report?: Record<string, unknown>
+    report?: Record<string, unknown>,
+    chunkState?: { offset: number; totalItems: number; processedInChunk: number; hasMore: boolean }
   ): Promise<void> {
     const progressJson = progress ? JSON.stringify(progress) : null;
     const reportJson = report ? JSON.stringify(report) : null;
     const errorVal = error ?? null;
+    const chunkStateJson = chunkState ? JSON.stringify(chunkState) : null;
 
     await this.sql`
       UPDATE active_tasks
@@ -438,6 +449,7 @@ export class Storage {
           progress_json = COALESCE(${progressJson}, progress_json),
           error = COALESCE(${errorVal}, error),
           report_json = COALESCE(${reportJson}, report_json),
+          chunk_state_json = COALESCE(${chunkStateJson}, chunk_state_json),
           updated_at = NOW()
       WHERE id = ${taskId}
     `;
@@ -453,12 +465,15 @@ export class Storage {
     progress: Record<string, unknown> | null;
     error: string | null;
     report: Record<string, unknown> | null;
+    chunkState: { offset: number; totalItems: number; processedInChunk: number; hasMore: boolean } | null;
   } | null> {
     const result = await this.sql`SELECT * FROM active_tasks WHERE id = ${taskId}`;
     const rows = this.toRows(result);
     if (rows.length === 0) return null;
 
     const row = rows[0];
+    const chunkStateRaw = row.chunk_state_json ? this.safeJsonParse(String(row.chunk_state_json), `active task ${taskId} chunk_state`) : null;
+
     return {
       id: String(row.id),
       user_id: String(row.user_id),
@@ -469,6 +484,7 @@ export class Storage {
       progress: row.progress_json ? this.safeJsonParse(String(row.progress_json), `active task ${taskId} progress`) : null,
       error: row.error ? String(row.error) : null,
       report: row.report_json ? this.safeJsonParse(String(row.report_json), `active task ${taskId} report`) : null,
+      chunkState: chunkStateRaw as { offset: number; totalItems: number; processedInChunk: number; hasMore: boolean } | null,
     };
   }
 
@@ -529,7 +545,7 @@ export class Storage {
     await this.sql`
       INSERT INTO synced_tracks (user_id, spotify_id, qobuz_id, sync_type)
       VALUES (${userId}, ${spotifyId}, ${qobuzId}, ${syncType})
-      ON CONFLICT (user_id, spotify_id) DO UPDATE SET qobuz_id = ${qobuzId}, synced_at = NOW()
+      ON CONFLICT (user_id, spotify_id, sync_type) DO UPDATE SET qobuz_id = ${qobuzId}, synced_at = NOW()
     `;
   }
 
