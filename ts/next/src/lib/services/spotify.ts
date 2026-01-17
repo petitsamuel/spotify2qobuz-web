@@ -403,14 +403,14 @@ export class SpotifyClient {
     saved_albums: number;
   }> {
     const [profileData, playlistsData, tracksData, albumsData] = await Promise.all([
-      this.request<{ display_name: string }>('/me'),
+      this.request<{ display_name: string | null; id: string }>('/me'),
       this.request<{ total: number }>('/me/playlists?limit=1'),
       this.request<{ total: number }>('/me/tracks?limit=1'),
       this.request<{ total: number }>('/me/albums?limit=1'),
     ]);
 
     return {
-      display_name: profileData.display_name,
+      display_name: profileData.display_name ?? profileData.id,
       playlists: playlistsData.total,
       saved_tracks: tracksData.total,
       saved_albums: albumsData.total,
