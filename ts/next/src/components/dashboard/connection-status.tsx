@@ -43,7 +43,9 @@ export function ConnectionStatus() {
 
     if (shouldCleanUrl) {
       hasProcessedOAuthRef.current = true;
-      window.history.replaceState({}, '', '/');
+      // Preserve current pathname and hash, only remove query params
+      const cleanUrl = window.location.pathname + window.location.hash;
+      window.history.replaceState({}, '', cleanUrl);
     }
   }, [queryClient]);
 
