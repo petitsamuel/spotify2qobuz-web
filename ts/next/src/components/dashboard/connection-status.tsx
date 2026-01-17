@@ -1,6 +1,8 @@
 'use client';
 
-import { useQuery } from '@tanstack/react-query';
+import { Suspense, useEffect } from 'react';
+import { useSearchParams } from 'next/navigation';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -17,6 +19,28 @@ interface QobuzStats {
   favorites: number;
   albums: number;
   playlists: number;
+}
+
+// Separate component that uses useSearchParams (requires Suspense)
+function ConnectionParamsHandler() {
+  const searchParams = useSearchParams();
+  const queryClient = useQueryClient();
+
+  // Invalidate queries when redirected back from OAuth
+  useEffect(() => {
+    if (searchParams.get('spotify_connected') === 'true') {
+      queryClient.invalidateQueries({ queryKey: ['spotifyStats'] });
+      // Clean up URL
+      window.history.replaceState({}, '', '/');
+    }
+    if (searchParams.get('qobuz_connected') === 'true') {
+      queryClient.invalidateQueries({ queryKey: ['qobuzStats'] });
+      // Clean up URL
+      window.history.replaceState({}, '', '/');
+    }
+  }, [searchParams, queryClient]);
+
+  return null;
 }
 
 export function ConnectionStatus() {
@@ -55,64 +79,69 @@ export function ConnectionStatus() {
   };
 
   return (
-    <div className="grid gap-4 md:grid-cols-2">
-      <Card>
-        <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-          <CardTitle className="text-sm font-medium">Spotify</CardTitle>
-          <Badge variant={spotifyQuery.data ? 'default' : 'secondary'}>
-            {spotifyQuery.data ? 'Connected' : 'Not Connected'}
-          </Badge>
-        </CardHeader>
-        <CardContent>
-          {spotifyQuery.isLoading ? (
-            <p className="text-sm text-muted-foreground">Loading...</p>
-          ) : spotifyQuery.data ? (
-            <div className="space-y-2">
-              <p className="text-lg font-semibold">{spotifyQuery.data.display_name}</p>
-              <div className="text-sm text-muted-foreground">
-                <p>{spotifyQuery.data.playlists} playlists</p>
-                <p>{spotifyQuery.data.saved_tracks} saved tracks</p>
-                <p>{spotifyQuery.data.saved_albums} saved albums</p>
+    <>
+      <Suspense fallback={null}>
+        <ConnectionParamsHandler />
+      </Suspense>
+      <div className="grid gap-4 md:grid-cols-2">
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+            <CardTitle className="text-sm font-medium">Spotify</CardTitle>
+            <Badge variant={spotifyQuery.data ? 'default' : 'secondary'}>
+              {spotifyQuery.data ? 'Connected' : 'Not Connected'}
+            </Badge>
+          </CardHeader>
+          <CardContent>
+            {spotifyQuery.isLoading ? (
+              <p className="text-sm text-muted-foreground">Loading...</p>
+            ) : spotifyQuery.data ? (
+              <div className="space-y-2">
+                <p className="text-lg font-semibold">{spotifyQuery.data.display_name}</p>
+                <div className="text-sm text-muted-foreground">
+                  <p>{spotifyQuery.data.playlists} playlists</p>
+                  <p>{spotifyQuery.data.saved_tracks} saved tracks</p>
+                  <p>{spotifyQuery.data.saved_albums} saved albums</p>
+                </div>
+                <Button variant="outline" size="sm" onClick={handleSpotifyDisconnect}>
+                  Disconnect
+                </Button>
               </div>
-              <Button variant="outline" size="sm" onClick={handleSpotifyDisconnect}>
-                Disconnect
-              </Button>
-            </div>
-          ) : (
-            <Button onClick={handleSpotifyConnect}>Connect Spotify</Button>
-          )}
-        </CardContent>
-      </Card>
+            ) : (
+              <Button onClick={handleSpotifyConnect}>Connect Spotify</Button>
+            )}
+          </CardContent>
+        </Card>
 
-      <Card>
-        <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-          <CardTitle className="text-sm font-medium">Qobuz</CardTitle>
-          <Badge variant={qobuzQuery.data ? 'default' : 'secondary'}>
-            {qobuzQuery.data ? 'Connected' : 'Not Connected'}
-          </Badge>
-        </CardHeader>
-        <CardContent>
-          {qobuzQuery.isLoading ? (
-            <p className="text-sm text-muted-foreground">Loading...</p>
-          ) : qobuzQuery.data ? (
-            <div className="space-y-2">
-              <p className="text-lg font-semibold">{qobuzQuery.data.display_name}</p>
-              <div className="text-sm text-muted-foreground">
-                <p>{qobuzQuery.data.playlists} playlists</p>
-                <p>{qobuzQuery.data.favorites} favorite tracks</p>
-                <p>{qobuzQuery.data.albums} albums</p>
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+            <CardTitle className="text-sm font-medium">Qobuz</CardTitle>
+            <Badge variant={qobuzQuery.data ? 'default' : 'secondary'}>
+              {qobuzQuery.data ? 'Connected' : 'Not Connected'}
+            </Badge>
+          </CardHeader>
+          <CardContent>
+            {qobuzQuery.isLoading ? (
+              <p className="text-sm text-muted-foreground">Loading...</p>
+            ) : qobuzQuery.data ? (
+              <div className="space-y-2">
+                <p className="text-lg font-semibold">{qobuzQuery.data.display_name}</p>
+                <div className="text-sm text-muted-foreground">
+                  <p>{qobuzQuery.data.playlists} playlists</p>
+                  <p>{qobuzQuery.data.favorites} favorite tracks</p>
+                  <p>{qobuzQuery.data.albums} albums</p>
+                </div>
+                <Button variant="outline" size="sm" onClick={handleQobuzDisconnect}>
+                  Disconnect
+                </Button>
               </div>
-              <Button variant="outline" size="sm" onClick={handleQobuzDisconnect}>
-                Disconnect
+            ) : (
+              <Button asChild>
+                <a href="/auth/qobuz">Connect Qobuz</a>
               </Button>
-            </div>
-          ) : (
-            <Button asChild>
-              <a href="/auth/qobuz">Connect Qobuz</a>
-            </Button>
-          )}
-        </CardContent>
-      </Card>
-    </div>
+            )}
+          </CardContent>
+        </Card>
+      </div>
+    </>
   );
 }
