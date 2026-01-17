@@ -227,12 +227,76 @@ export class Storage {
       END $$;
     `;
 
-    // Create indexes for performance
+    // Ensure user_id columns exist on all tables (handles legacy databases where
+    // migrations may have been marked complete but columns weren't actually added)
+    await this.sql`
+      DO $$
+      BEGIN
+        -- Add user_id to credentials if missing
+        IF NOT EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_name = 'credentials' AND column_name = 'user_id'
+        ) THEN
+          ALTER TABLE credentials ADD COLUMN user_id TEXT NOT NULL DEFAULT 'legacy_user';
+        END IF;
+
+        -- Add user_id to migrations if missing
+        IF NOT EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_name = 'migrations' AND column_name = 'user_id'
+        ) THEN
+          ALTER TABLE migrations ADD COLUMN user_id TEXT NOT NULL DEFAULT 'legacy_user';
+        END IF;
+
+        -- Add user_id to sync_tasks if missing
+        IF NOT EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_name = 'sync_tasks' AND column_name = 'user_id'
+        ) THEN
+          ALTER TABLE sync_tasks ADD COLUMN user_id TEXT NOT NULL DEFAULT 'legacy_user';
+        END IF;
+
+        -- Add user_id to synced_tracks if missing
+        IF NOT EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_name = 'synced_tracks' AND column_name = 'user_id'
+        ) THEN
+          ALTER TABLE synced_tracks ADD COLUMN user_id TEXT NOT NULL DEFAULT 'legacy_user';
+        END IF;
+
+        -- Add user_id to sync_progress if missing
+        IF NOT EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_name = 'sync_progress' AND column_name = 'user_id'
+        ) THEN
+          ALTER TABLE sync_progress ADD COLUMN user_id TEXT NOT NULL DEFAULT 'legacy_user';
+        END IF;
+
+        -- Add user_id to unmatched_tracks if missing
+        IF NOT EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_name = 'unmatched_tracks' AND column_name = 'user_id'
+        ) THEN
+          ALTER TABLE unmatched_tracks ADD COLUMN user_id TEXT NOT NULL DEFAULT 'legacy_user';
+        END IF;
+
+        -- Add user_id to active_tasks if missing
+        IF NOT EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_name = 'active_tasks' AND column_name = 'user_id'
+        ) THEN
+          ALTER TABLE active_tasks ADD COLUMN user_id TEXT NOT NULL DEFAULT 'legacy_user';
+        END IF;
+      END $$;
+    `;
+
+    // Create indexes for performance (safe now that columns are guaranteed to exist)
     await this.sql`CREATE INDEX IF NOT EXISTS idx_credentials_user ON credentials(user_id)`;
     await this.sql`CREATE INDEX IF NOT EXISTS idx_migrations_user ON migrations(user_id)`;
     await this.sql`CREATE INDEX IF NOT EXISTS idx_sync_tasks_user ON sync_tasks(user_id)`;
     await this.sql`CREATE INDEX IF NOT EXISTS idx_synced_tracks_user ON synced_tracks(user_id)`;
     await this.sql`CREATE INDEX IF NOT EXISTS idx_synced_tracks_sync_type ON synced_tracks(sync_type)`;
+    await this.sql`CREATE INDEX IF NOT EXISTS idx_sync_progress_user ON sync_progress(user_id)`;
     await this.sql`CREATE INDEX IF NOT EXISTS idx_unmatched_user ON unmatched_tracks(user_id)`;
     await this.sql`CREATE INDEX IF NOT EXISTS idx_unmatched_status ON unmatched_tracks(status)`;
     await this.sql`CREATE INDEX IF NOT EXISTS idx_migrations_started ON migrations(started_at DESC)`;
