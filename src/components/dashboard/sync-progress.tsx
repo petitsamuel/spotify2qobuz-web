@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Progress } from '@/components/ui/progress';
@@ -39,23 +39,35 @@ interface SyncProgressProps {
   onComplete: () => void;
 }
 
+// Polling interval in milliseconds - fast enough for good UX, slow enough to not overload
+const POLLING_INTERVAL_MS = 1500;
+
 export function SyncProgress({ taskId, syncType, onComplete }: SyncProgressProps) {
   const [status, setStatus] = useState<string>('starting');
   const [progress, setProgress] = useState<SyncProgressData>({});
   const [report, setReport] = useState<SyncReport | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [connectionError, setConnectionError] = useState<boolean>(false);
+  const retryCountRef = useRef(0);
+  const maxRetries = 3;
 
-  useEffect(() => {
-    const eventSource = new EventSource(`/api/sync/progress/${taskId}`);
+  const fetchProgress = useCallback(async (): Promise<boolean> => {
+    try {
+      const response = await fetch(`/api/sync/status/${taskId}`);
 
-    eventSource.onmessage = (event) => {
-      const data = JSON.parse(event.data);
-
-      if (data.status === 'not_found') {
-        eventSource.close();
-        setError('Task not found');
-        return;
+      if (!response.ok) {
+        if (response.status === 404) {
+          setError('Task not found');
+          return false; // Stop polling
+        }
+        throw new Error(`HTTP ${response.status}`);
       }
+
+      const data = await response.json();
+
+      // Reset retry count on successful fetch
+      retryCountRef.current = 0;
+      setConnectionError(false);
 
       setStatus(data.status);
       if (data.progress) {
@@ -68,25 +80,73 @@ export function SyncProgress({ taskId, syncType, onComplete }: SyncProgressProps
         setError(data.error);
       }
 
+      // Return false to stop polling when task is complete
       if (['completed', 'failed', 'cancelled'].includes(data.status)) {
-        eventSource.close();
+        return false;
+      }
+
+      return true; // Continue polling
+    } catch (err) {
+      retryCountRef.current++;
+      console.error(`Failed to fetch progress (attempt ${retryCountRef.current}):`, err);
+
+      if (retryCountRef.current >= maxRetries) {
+        setConnectionError(true);
+        setError('Lost connection to server. Please refresh the page.');
+        return false; // Stop polling after max retries
+      }
+
+      return true; // Continue polling to retry
+    }
+  }, [taskId]);
+
+  useEffect(() => {
+    let intervalId: ReturnType<typeof setInterval> | null = null;
+    let isMounted = true;
+
+    const startPolling = async () => {
+      // Fetch immediately on mount
+      const shouldContinue = await fetchProgress();
+
+      if (!isMounted) return;
+
+      if (shouldContinue) {
+        intervalId = setInterval(async () => {
+          if (!isMounted) {
+            if (intervalId) clearInterval(intervalId);
+            return;
+          }
+
+          const continuePolling = await fetchProgress();
+          if (!continuePolling && intervalId) {
+            clearInterval(intervalId);
+          }
+        }, POLLING_INTERVAL_MS);
       }
     };
 
-    eventSource.onerror = () => {
-      eventSource.close();
-    };
+    startPolling();
 
     return () => {
-      eventSource.close();
+      isMounted = false;
+      if (intervalId) {
+        clearInterval(intervalId);
+      }
     };
-  }, [taskId]);
+  }, [fetchProgress]);
 
   const handleCancel = async () => {
     await fetch(`/api/sync/cancel/${taskId}`, { method: 'POST' });
   };
 
-  const isActive = ['starting', 'running'].includes(status);
+  const handleRetry = () => {
+    retryCountRef.current = 0;
+    setConnectionError(false);
+    setError(null);
+    fetchProgress();
+  };
+
+  const isActive = ['starting', 'running'].includes(status) && !connectionError;
   const isComplete = status === 'completed';
   const isFailed = status === 'failed';
   const isCancelled = status === 'cancelled';
@@ -193,6 +253,22 @@ export function SyncProgress({ taskId, syncType, onComplete }: SyncProgressProps
             <Button variant="outline" onClick={onComplete}>
               Dismiss
             </Button>
+          </div>
+        )}
+
+        {connectionError && (
+          <div className="space-y-4">
+            <div className="rounded-md bg-yellow-500/10 p-3 text-sm text-yellow-700 dark:text-yellow-400">
+              {error ?? 'Connection lost. The sync may still be running in the background.'}
+            </div>
+            <div className="flex gap-2">
+              <Button variant="outline" onClick={handleRetry}>
+                Retry
+              </Button>
+              <Button variant="ghost" onClick={onComplete}>
+                Dismiss
+              </Button>
+            </div>
           </div>
         )}
       </CardContent>

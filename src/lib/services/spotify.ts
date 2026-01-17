@@ -398,9 +398,10 @@ export class SpotifyClient {
   }
 
   /**
-   * Get library statistics including user display name.
+   * Get library statistics including user display name and user ID.
    */
   async getStats(): Promise<{
+    user_id: string;
     display_name: string;
     playlists: number;
     saved_tracks: number;
@@ -414,6 +415,7 @@ export class SpotifyClient {
     ]);
 
     return {
+      user_id: profileData.id,
       display_name: profileData.display_name ?? profileData.id,
       playlists: playlistsData.total,
       saved_tracks: tracksData.total,

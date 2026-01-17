@@ -3,13 +3,18 @@
  */
 
 import { NextRequest } from 'next/server';
-import { ensureDbInitialized, jsonError } from '@/lib/api-helpers';
+import { ensureDbInitialized, getCurrentUserId, jsonError } from '@/lib/api-helpers';
 import { logger } from '@/lib/logger';
 
 export async function GET(
   _request: NextRequest,
   { params }: { params: Promise<{ taskId: string }> }
 ) {
+  const userId = await getCurrentUserId();
+  if (!userId) {
+    return jsonError('Not authenticated', 401);
+  }
+
   const { taskId } = await params;
 
   try {
@@ -18,6 +23,11 @@ export async function GET(
     // First check active tasks
     const activeTask = await storage.getActiveTask(taskId);
     if (activeTask) {
+      // Verify task belongs to current user
+      if (activeTask.user_id !== userId) {
+        return jsonError('Task not found', 404);
+      }
+
       return Response.json({
         task_id: taskId,
         status: activeTask.status,
@@ -27,7 +37,7 @@ export async function GET(
       });
     }
 
-    // Fall back to database task
+    // Fall back to database task (note: sync_tasks doesn't have user ownership check yet)
     const dbTask = await storage.getTask(taskId);
     if (dbTask) {
       return Response.json({

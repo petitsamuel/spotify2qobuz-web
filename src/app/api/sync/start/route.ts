@@ -4,7 +4,7 @@
 
 import { NextRequest } from 'next/server';
 import { randomBytes } from 'crypto';
-import { ensureDbInitialized, getBothClients, jsonError } from '@/lib/api-helpers';
+import { ensureDbInitialized, getBothClients, getCurrentUserId, jsonError } from '@/lib/api-helpers';
 import { AsyncSyncService } from '@/lib/services/sync';
 import { logger } from '@/lib/logger';
 import { Storage } from '@/lib/db/storage';
@@ -13,6 +13,11 @@ import { QobuzClient } from '@/lib/services/qobuz';
 import type { SyncProgress } from '@/lib/types';
 
 export async function POST(request: NextRequest) {
+  const userId = await getCurrentUserId();
+  if (!userId) {
+    return jsonError('Not authenticated', 401);
+  }
+
   const storage = await ensureDbInitialized();
 
   const formData = await request.formData();
@@ -24,7 +29,7 @@ export async function POST(request: NextRequest) {
   }
 
   // Check for existing active sync
-  const existingTask = await storage.getRunningTask();
+  const existingTask = await storage.getRunningTask(userId);
   if (existingTask) {
     return Response.json({
       error: 'A sync is already in progress',
@@ -34,15 +39,15 @@ export async function POST(request: NextRequest) {
   }
 
   // Get clients
-  const clients = await getBothClients(storage);
+  const clients = await getBothClients(storage, userId);
   if (!clients) {
     return jsonError('Not authenticated', 401);
   }
 
   // Create task
   const taskId = randomBytes(8).toString('hex');
-  const migrationId = await storage.createMigration(syncType, dryRun);
-  await storage.createTask(taskId, migrationId);
+  const migrationId = await storage.createMigration(userId, syncType, dryRun);
+  await storage.createTask(userId, taskId, migrationId);
 
   // Initialize progress
   const initialProgress: SyncProgress = {
@@ -60,20 +65,21 @@ export async function POST(request: NextRequest) {
   };
 
   // Store active task in database
-  await storage.createActiveTask(taskId, migrationId, syncType, dryRun, initialProgress as unknown as Record<string, unknown>);
+  await storage.createActiveTask(userId, taskId, migrationId, syncType, dryRun, initialProgress as unknown as Record<string, unknown>);
 
   // Start sync in background
-  runSync(taskId, syncType, dryRun, storage, clients.spotify, clients.qobuz, migrationId)
+  runSync(userId, taskId, syncType, dryRun, storage, clients.spotify, clients.qobuz, migrationId)
     .catch((err) => {
       logger.error(`Unexpected sync error for task ${taskId}: ${err}`);
       storage.updateActiveTask(taskId, 'failed', undefined, String(err));
     });
 
-  logger.info(`Started ${syncType} sync (task=${taskId}, dry_run=${dryRun})`);
+  logger.info(`Started ${syncType} sync (task=${taskId}, user=${userId}, dry_run=${dryRun})`);
   return Response.json({ task_id: taskId, status: 'starting' });
 }
 
 async function runSync(
+  userId: string,
   taskId: string,
   syncType: string,
   dryRun: boolean,
@@ -82,7 +88,7 @@ async function runSync(
   qobuzClient: QobuzClient,
   migrationId: number
 ): Promise<void> {
-  const alreadySynced = await storage.getSyncedTrackIds(syncType);
+  const alreadySynced = await storage.getSyncedTrackIds(userId, syncType);
 
   // Create cancellation checker that queries the database
   const checkCancelled = async (): Promise<boolean> => {
@@ -105,7 +111,7 @@ async function runSync(
 
   try {
     const onItemSynced = async (spotifyId: string, qobuzId: string) => {
-      await storage.markTrackSynced(spotifyId, qobuzId, syncType);
+      await storage.markTrackSynced(userId, spotifyId, qobuzId, syncType);
     };
 
     let report;
@@ -114,6 +120,7 @@ async function runSync(
       report = await syncService.syncFavorites(dryRun, alreadySynced, onItemSynced);
       for (const track of report.missing_tracks) {
         await storage.saveUnmatchedTrack(
+          userId,
           track.spotify_id,
           track.title,
           track.artist,
@@ -126,6 +133,7 @@ async function runSync(
       report = await syncService.syncAlbums(dryRun, alreadySynced, onItemSynced);
       for (const album of report.missing_albums) {
         await storage.saveUnmatchedTrack(
+          userId,
           album.spotify_id,
           album.title,
           album.artist,
@@ -138,6 +146,7 @@ async function runSync(
       report = await syncService.syncPlaylists(undefined, dryRun);
       for (const track of report.missing_tracks) {
         await storage.saveUnmatchedTrack(
+          userId,
           track.spotify_id,
           track.title,
           track.artist,

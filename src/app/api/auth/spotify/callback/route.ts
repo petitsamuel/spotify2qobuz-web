@@ -4,7 +4,7 @@
 
 import { redirect } from 'next/navigation';
 import { NextRequest } from 'next/server';
-import { ensureDbInitialized } from '@/lib/api-helpers';
+import { ensureDbInitialized, setCurrentUserId } from '@/lib/api-helpers';
 import { SpotifyClient } from '@/lib/services/spotify';
 import { logger } from '@/lib/logger';
 
@@ -60,10 +60,12 @@ export async function GET(request: NextRequest) {
     redirect('/?error=token_exchange_failed');
   }
 
-  // Verify credentials work
+  // Verify credentials work and get user ID
+  let userId: string;
   try {
     const client = new SpotifyClient(credentials);
-    await client.getStats();
+    const stats = await client.getStats();
+    userId = stats.user_id;
   } catch (err) {
     const error = err instanceof Error ? err : new Error(String(err));
     logger.error('Spotify credential verification failed', {
@@ -73,9 +75,9 @@ export async function GET(request: NextRequest) {
     redirect('/?error=credential_verification_failed');
   }
 
-  // Save credentials to database
+  // Save credentials to database with user ID
   try {
-    await storage.saveCredentials('spotify', credentials as unknown as Record<string, unknown>);
+    await storage.saveCredentials(userId, 'spotify', credentials as unknown as Record<string, unknown>);
   } catch (err) {
     const error = err instanceof Error ? err : new Error(String(err));
     logger.error('Failed to save Spotify credentials', {
@@ -85,6 +87,9 @@ export async function GET(request: NextRequest) {
     redirect('/?error=credential_storage_failed');
   }
 
-  logger.info('Spotify connected successfully');
+  // Set user session cookie
+  await setCurrentUserId(userId);
+
+  logger.info(`Spotify connected successfully for user ${userId}`);
   redirect('/?spotify_connected=true');
 }

@@ -2,14 +2,19 @@
  * Get active sync task API route.
  */
 
-import { ensureDbInitialized, jsonError } from '@/lib/api-helpers';
+import { ensureDbInitialized, getCurrentUserId, jsonError } from '@/lib/api-helpers';
 import { logger } from '@/lib/logger';
 
 export async function GET() {
   try {
+    const userId = await getCurrentUserId();
+    if (!userId) {
+      return jsonError('Not authenticated', 401);
+    }
+
     const storage = await ensureDbInitialized();
 
-    const task = await storage.getRunningTask();
+    const task = await storage.getRunningTask(userId);
     if (!task) {
       return Response.json({});
     }
