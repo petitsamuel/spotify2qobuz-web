@@ -3,6 +3,7 @@
  */
 
 import { cookies } from 'next/headers';
+import { NextRequest, NextResponse } from 'next/server';
 import { Storage } from './db/storage';
 import { SpotifyClient, SpotifyCredentials } from './services/spotify';
 import { QobuzClient } from './services/qobuz';
@@ -25,18 +26,32 @@ export function getStorage(): Storage {
 // Initialize database on first use
 let dbInitialized = false;
 
+/**
+ * Helper to format error messages consistently.
+ */
+function formatError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 export async function ensureDbInitialized(): Promise<Storage> {
   const storage = getStorage();
   if (!dbInitialized) {
     try {
       await storage.initDb();
       dbInitialized = true;
-      logger.info('Database initialized successfully');
     } catch (error) {
-      const errorMsg = error instanceof Error ? error.message : String(error);
-      logger.error(`Critical database initialization failure: ${errorMsg}`);
-      // Don't set dbInitialized = true, so next request will retry
-      throw new Error(`Failed to initialize database. The application cannot start. Error: ${errorMsg}`);
+      logger.error('Database initialization failed', {
+        error,
+        errorMessage: formatError(error),
+        stack: error instanceof Error ? error.stack : undefined,
+        databaseUrl: process.env.DATABASE_URL ? 'set' : 'missing',
+      });
+
+      const wrappedError = new Error(
+        `Cannot initialize database: ${formatError(error)}. Please check DATABASE_URL environment variable and database permissions.`,
+        { cause: error }
+      );
+      throw wrappedError;
     }
   }
   return storage;
@@ -135,4 +150,73 @@ export function getBaseUrl(request: Request): string {
   const host = request.headers.get('host') || 'localhost:3000';
   const protocol = request.headers.get('x-forwarded-proto') || 'http';
   return `${protocol}://${host}`;
+}
+
+/**
+ * Shared error handling wrapper for routes that require authentication and database.
+ * Handles authentication, database initialization, and error redirects with specific error codes.
+ */
+export async function withAuthAndErrorHandling(
+  request: NextRequest,
+  handler: (userId: string, storage: Storage, baseUrl: string) => Promise<NextResponse>
+): Promise<NextResponse> {
+  const baseUrl = getBaseUrl(request);
+
+  let userId: string | null;
+  try {
+    userId = await getCurrentUserId();
+  } catch (error) {
+    logger.error('Failed to get user ID', { error, stack: error instanceof Error ? error.stack : undefined });
+    return NextResponse.redirect(new URL('/?error=auth_error', baseUrl));
+  }
+
+  if (!userId) {
+    return NextResponse.redirect(new URL('/?error=not_authenticated', baseUrl));
+  }
+
+  let storage: Storage;
+  try {
+    storage = await ensureDbInitialized();
+  } catch (error) {
+    logger.error('Database initialization failed', { error, userId, stack: error instanceof Error ? error.stack : undefined });
+    return NextResponse.redirect(new URL('/?error=database_unavailable', baseUrl));
+  }
+
+  try {
+    return await handler(userId, storage, baseUrl);
+  } catch (error) {
+    logger.error('Request handler failed', {
+      error,
+      userId,
+      errorMessage: formatError(error),
+      stack: error instanceof Error ? error.stack : undefined
+    });
+    return NextResponse.redirect(new URL('/?error=operation_failed', baseUrl));
+  }
+}
+
+/**
+ * Shared error handling wrapper for sync operations.
+ * Handles authentication, database initialization, and returns JSON errors.
+ */
+export async function withSyncAuth(
+  request: NextRequest,
+  handler: (userId: string, storage: Storage) => Promise<Response>
+): Promise<Response> {
+  try {
+    const userId = await getCurrentUserId();
+    if (!userId) {
+      return jsonError('Not authenticated', 401);
+    }
+
+    const storage = await ensureDbInitialized();
+    return await handler(userId, storage);
+  } catch (error) {
+    logger.error('Sync operation failed', {
+      error,
+      errorMessage: formatError(error),
+      stack: error instanceof Error ? error.stack : undefined,
+    });
+    return jsonError('Operation failed', 500);
+  }
 }

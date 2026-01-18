@@ -102,197 +102,209 @@ export class Storage {
   }
 
   async initDb(): Promise<void> {
-    // Credentials now keyed by (user_id, service) for multi-user support
-    await this.sql`
-      CREATE TABLE IF NOT EXISTS credentials (
-        id SERIAL PRIMARY KEY,
-        user_id TEXT NOT NULL,
-        service TEXT NOT NULL,
-        data TEXT NOT NULL,
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        UNIQUE(user_id, service)
-      )
-    `;
-
-    // Migrations track sync history per user
-    await this.sql`
-      CREATE TABLE IF NOT EXISTS migrations (
-        id SERIAL PRIMARY KEY,
-        user_id TEXT NOT NULL,
-        started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        completed_at TIMESTAMPTZ,
-        status TEXT NOT NULL,
-        migration_type TEXT NOT NULL,
-        dry_run BOOLEAN DEFAULT FALSE,
-        playlists_total INTEGER DEFAULT 0,
-        playlists_synced INTEGER DEFAULT 0,
-        tracks_matched INTEGER DEFAULT 0,
-        tracks_not_matched INTEGER DEFAULT 0,
-        isrc_matches INTEGER DEFAULT 0,
-        fuzzy_matches INTEGER DEFAULT 0,
-        report_json TEXT
-      )
-    `;
-
-    await this.sql`
-      CREATE TABLE IF NOT EXISTS sync_tasks (
-        id TEXT PRIMARY KEY,
-        user_id TEXT NOT NULL,
-        migration_id INTEGER REFERENCES migrations(id),
-        status TEXT NOT NULL,
-        progress_json TEXT,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-      )
-    `;
-
-    // Synced tracks keyed by (user_id, spotify_id, sync_type) for multi-user support
-    await this.sql`
-      CREATE TABLE IF NOT EXISTS synced_tracks (
-        id SERIAL PRIMARY KEY,
-        user_id TEXT NOT NULL,
-        spotify_id TEXT NOT NULL,
-        qobuz_id TEXT,
-        sync_type TEXT NOT NULL,
-        synced_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        UNIQUE(user_id, spotify_id, sync_type)
-      )
-    `;
-
-    // Sync progress per user
-    await this.sql`
-      CREATE TABLE IF NOT EXISTS sync_progress (
-        id SERIAL PRIMARY KEY,
-        user_id TEXT NOT NULL,
-        sync_type TEXT NOT NULL,
-        last_offset INTEGER DEFAULT 0,
-        total_tracks INTEGER DEFAULT 0,
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        UNIQUE(user_id, sync_type)
-      )
-    `;
-
-    // Unmatched tracks per user
-    await this.sql`
-      CREATE TABLE IF NOT EXISTS unmatched_tracks (
-        id SERIAL PRIMARY KEY,
-        user_id TEXT NOT NULL,
-        spotify_id TEXT NOT NULL,
-        title TEXT NOT NULL,
-        artist TEXT NOT NULL,
-        album TEXT,
-        sync_type TEXT NOT NULL,
-        suggestions_json TEXT,
-        status TEXT DEFAULT 'pending',
-        resolved_qobuz_id TEXT,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        UNIQUE(user_id, spotify_id, sync_type)
-      )
-    `;
-
-    // OAuth state table for secure state management
-    await this.sql`
-      CREATE TABLE IF NOT EXISTS oauth_state (
-        id TEXT PRIMARY KEY,
-        redirect_uri TEXT NOT NULL,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        expires_at TIMESTAMPTZ NOT NULL
-      )
-    `;
-
-    // Active tasks table (replaces in-memory Map for multi-instance support)
-    await this.sql`
-      CREATE TABLE IF NOT EXISTS active_tasks (
-        id TEXT PRIMARY KEY,
-        user_id TEXT NOT NULL,
-        migration_id INTEGER REFERENCES migrations(id),
-        sync_type TEXT NOT NULL,
-        status TEXT NOT NULL,
-        dry_run BOOLEAN DEFAULT FALSE,
-        progress_json TEXT,
-        error TEXT,
-        report_json TEXT,
-        chunk_state_json TEXT,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-      )
-    `;
-
-    // Add chunk_state_json column if it doesn't exist (for existing deployments)
-    await this.sql`
-      DO $$ BEGIN
-        ALTER TABLE active_tasks ADD COLUMN IF NOT EXISTS chunk_state_json TEXT;
-      EXCEPTION WHEN duplicate_column THEN NULL;
-      END $$;
-    `;
-
-    // Ensure user_id columns exist on all tables (handles legacy databases where
-    // migrations may have been marked complete but columns weren't actually added)
-    await this.sql`
-      DO $$
-      BEGIN
-        -- Add user_id to credentials if missing
-        IF NOT EXISTS (
-          SELECT 1 FROM information_schema.columns
-          WHERE table_name = 'credentials' AND column_name = 'user_id'
-        ) THEN
-          ALTER TABLE credentials ADD COLUMN user_id TEXT NOT NULL DEFAULT 'legacy_user';
-        END IF;
-
-        -- Add user_id to migrations if missing
-        IF NOT EXISTS (
-          SELECT 1 FROM information_schema.columns
-          WHERE table_name = 'migrations' AND column_name = 'user_id'
-        ) THEN
-          ALTER TABLE migrations ADD COLUMN user_id TEXT NOT NULL DEFAULT 'legacy_user';
-        END IF;
-
-        -- Add user_id to sync_tasks if missing
-        IF NOT EXISTS (
-          SELECT 1 FROM information_schema.columns
-          WHERE table_name = 'sync_tasks' AND column_name = 'user_id'
-        ) THEN
-          ALTER TABLE sync_tasks ADD COLUMN user_id TEXT NOT NULL DEFAULT 'legacy_user';
-        END IF;
-
-        -- Add user_id to synced_tracks if missing
-        IF NOT EXISTS (
-          SELECT 1 FROM information_schema.columns
-          WHERE table_name = 'synced_tracks' AND column_name = 'user_id'
-        ) THEN
-          ALTER TABLE synced_tracks ADD COLUMN user_id TEXT NOT NULL DEFAULT 'legacy_user';
-        END IF;
-
-        -- Add user_id to sync_progress if missing
-        IF NOT EXISTS (
-          SELECT 1 FROM information_schema.columns
-          WHERE table_name = 'sync_progress' AND column_name = 'user_id'
-        ) THEN
-          ALTER TABLE sync_progress ADD COLUMN user_id TEXT NOT NULL DEFAULT 'legacy_user';
-        END IF;
-
-        -- Add user_id to unmatched_tracks if missing
-        IF NOT EXISTS (
-          SELECT 1 FROM information_schema.columns
-          WHERE table_name = 'unmatched_tracks' AND column_name = 'user_id'
-        ) THEN
-          ALTER TABLE unmatched_tracks ADD COLUMN user_id TEXT NOT NULL DEFAULT 'legacy_user';
-        END IF;
-
-        -- Add user_id to active_tasks if missing
-        IF NOT EXISTS (
-          SELECT 1 FROM information_schema.columns
-          WHERE table_name = 'active_tasks' AND column_name = 'user_id'
-        ) THEN
-          ALTER TABLE active_tasks ADD COLUMN user_id TEXT NOT NULL DEFAULT 'legacy_user';
-        END IF;
-      END $$;
-    `;
-
-    // Ensure UNIQUE constraints exist on all tables (handles legacy databases where
-    // user_id column was added but constraints weren't updated)
     try {
+      // Credentials now keyed by (user_id, service) for multi-user support
+      await this.sql`
+        CREATE TABLE IF NOT EXISTS credentials (
+          id SERIAL PRIMARY KEY,
+          user_id TEXT NOT NULL,
+          service TEXT NOT NULL,
+          data TEXT NOT NULL,
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          UNIQUE(user_id, service)
+        )
+      `;
+
+      // Migrations track sync history per user
+      await this.sql`
+        CREATE TABLE IF NOT EXISTS migrations (
+          id SERIAL PRIMARY KEY,
+          user_id TEXT NOT NULL,
+          started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          completed_at TIMESTAMPTZ,
+          status TEXT NOT NULL,
+          migration_type TEXT NOT NULL,
+          dry_run BOOLEAN DEFAULT FALSE,
+          playlists_total INTEGER DEFAULT 0,
+          playlists_synced INTEGER DEFAULT 0,
+          tracks_matched INTEGER DEFAULT 0,
+          tracks_not_matched INTEGER DEFAULT 0,
+          isrc_matches INTEGER DEFAULT 0,
+          fuzzy_matches INTEGER DEFAULT 0,
+          report_json TEXT
+        )
+      `;
+
+      await this.sql`
+        CREATE TABLE IF NOT EXISTS sync_tasks (
+          id TEXT PRIMARY KEY,
+          user_id TEXT NOT NULL,
+          migration_id INTEGER REFERENCES migrations(id),
+          status TEXT NOT NULL,
+          progress_json TEXT,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      `;
+
+      // Synced tracks keyed by (user_id, spotify_id, sync_type) for multi-user support
+      await this.sql`
+        CREATE TABLE IF NOT EXISTS synced_tracks (
+          id SERIAL PRIMARY KEY,
+          user_id TEXT NOT NULL,
+          spotify_id TEXT NOT NULL,
+          qobuz_id TEXT,
+          sync_type TEXT NOT NULL,
+          synced_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          UNIQUE(user_id, spotify_id, sync_type)
+        )
+      `;
+
+      // Sync progress per user
+      await this.sql`
+        CREATE TABLE IF NOT EXISTS sync_progress (
+          id SERIAL PRIMARY KEY,
+          user_id TEXT NOT NULL,
+          sync_type TEXT NOT NULL,
+          last_offset INTEGER DEFAULT 0,
+          total_tracks INTEGER DEFAULT 0,
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          UNIQUE(user_id, sync_type)
+        )
+      `;
+
+      // Unmatched tracks per user
+      await this.sql`
+        CREATE TABLE IF NOT EXISTS unmatched_tracks (
+          id SERIAL PRIMARY KEY,
+          user_id TEXT NOT NULL,
+          spotify_id TEXT NOT NULL,
+          title TEXT NOT NULL,
+          artist TEXT NOT NULL,
+          album TEXT,
+          sync_type TEXT NOT NULL,
+          suggestions_json TEXT,
+          status TEXT DEFAULT 'pending',
+          resolved_qobuz_id TEXT,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          UNIQUE(user_id, spotify_id, sync_type)
+        )
+      `;
+
+      // OAuth state table for secure state management
+      await this.sql`
+        CREATE TABLE IF NOT EXISTS oauth_state (
+          id TEXT PRIMARY KEY,
+          redirect_uri TEXT NOT NULL,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          expires_at TIMESTAMPTZ NOT NULL
+        )
+      `;
+
+      // Active tasks table (replaces in-memory Map for multi-instance support)
+      await this.sql`
+        CREATE TABLE IF NOT EXISTS active_tasks (
+          id TEXT PRIMARY KEY,
+          user_id TEXT NOT NULL,
+          migration_id INTEGER REFERENCES migrations(id),
+          sync_type TEXT NOT NULL,
+          status TEXT NOT NULL,
+          dry_run BOOLEAN DEFAULT FALSE,
+          progress_json TEXT,
+          error TEXT,
+          report_json TEXT,
+          chunk_state_json TEXT,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      `;
+
+      // Add chunk_state_json column if it doesn't exist (for existing deployments)
+      await this.sql`
+        ALTER TABLE active_tasks ADD COLUMN IF NOT EXISTS chunk_state_json TEXT
+      `;
+
+      // Ensure user_id columns exist on all tables. This handles the edge case where
+      // migration v4 was previously marked as complete but failed to add user_id columns,
+      // leaving the database in an inconsistent state. Since migrations only run once,
+      // we defensively check and add missing columns here during every initDb() call.
+      //
+      // Note: Missing columns get DEFAULT 'legacy_user', which assigns all pre-existing
+      // data to a shared legacy user account. This is permanent unless migrated manually.
+      //
+      // TODO(2026-Q3): Once all production databases have user_id columns (post-v4 migration
+      // deployment), consider removing this defensive block or converting to a validation check.
+      await this.sql`
+        DO $$
+        BEGIN
+          -- Add user_id to credentials if missing
+          IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'credentials' AND column_name = 'user_id'
+          ) THEN
+            ALTER TABLE credentials ADD COLUMN user_id TEXT NOT NULL DEFAULT 'legacy_user';
+            RAISE NOTICE 'Added missing user_id column to credentials table';
+          END IF;
+
+          -- Add user_id to migrations if missing
+          IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'migrations' AND column_name = 'user_id'
+          ) THEN
+            ALTER TABLE migrations ADD COLUMN user_id TEXT NOT NULL DEFAULT 'legacy_user';
+            RAISE NOTICE 'Added missing user_id column to migrations table';
+          END IF;
+
+          -- Add user_id to sync_tasks if missing
+          IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'sync_tasks' AND column_name = 'user_id'
+          ) THEN
+            ALTER TABLE sync_tasks ADD COLUMN user_id TEXT NOT NULL DEFAULT 'legacy_user';
+            RAISE NOTICE 'Added missing user_id column to sync_tasks table';
+          END IF;
+
+          -- Add user_id to synced_tracks if missing
+          IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'synced_tracks' AND column_name = 'user_id'
+          ) THEN
+            ALTER TABLE synced_tracks ADD COLUMN user_id TEXT NOT NULL DEFAULT 'legacy_user';
+            RAISE NOTICE 'Added missing user_id column to synced_tracks table';
+          END IF;
+
+          -- Add user_id to sync_progress if missing
+          IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'sync_progress' AND column_name = 'user_id'
+          ) THEN
+            ALTER TABLE sync_progress ADD COLUMN user_id TEXT NOT NULL DEFAULT 'legacy_user';
+            RAISE NOTICE 'Added missing user_id column to sync_progress table';
+          END IF;
+
+          -- Add user_id to unmatched_tracks if missing
+          IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'unmatched_tracks' AND column_name = 'user_id'
+          ) THEN
+            ALTER TABLE unmatched_tracks ADD COLUMN user_id TEXT NOT NULL DEFAULT 'legacy_user';
+            RAISE NOTICE 'Added missing user_id column to unmatched_tracks table';
+          END IF;
+
+          -- Add user_id to active_tasks if missing
+          IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'active_tasks' AND column_name = 'user_id'
+          ) THEN
+            ALTER TABLE active_tasks ADD COLUMN user_id TEXT NOT NULL DEFAULT 'legacy_user';
+            RAISE NOTICE 'Added missing user_id column to active_tasks table';
+          END IF;
+        END $$;
+      `;
+
+      // Ensure UNIQUE constraints exist on all tables (handles legacy databases where
+      // user_id column was added but constraints weren't updated)
       logger.info('Starting UNIQUE constraint migration');
 
       // --- CREDENTIALS TABLE ---
@@ -460,27 +472,36 @@ export class Storage {
       }
 
       logger.info('UNIQUE constraint migration completed successfully');
+
+      // Create indexes for performance. The column existence checks and constraints above
+      // ensure PostgreSQL won't error when creating these indexes.
+      await this.sql`CREATE INDEX IF NOT EXISTS idx_credentials_user ON credentials(user_id)`;
+      await this.sql`CREATE INDEX IF NOT EXISTS idx_migrations_user ON migrations(user_id)`;
+      await this.sql`CREATE INDEX IF NOT EXISTS idx_sync_tasks_user ON sync_tasks(user_id)`;
+      await this.sql`CREATE INDEX IF NOT EXISTS idx_synced_tracks_user ON synced_tracks(user_id)`;
+      await this.sql`CREATE INDEX IF NOT EXISTS idx_synced_tracks_sync_type ON synced_tracks(sync_type)`;
+      await this.sql`CREATE INDEX IF NOT EXISTS idx_sync_progress_user ON sync_progress(user_id)`;
+      await this.sql`CREATE INDEX IF NOT EXISTS idx_unmatched_user ON unmatched_tracks(user_id)`;
+      await this.sql`CREATE INDEX IF NOT EXISTS idx_unmatched_status ON unmatched_tracks(status)`;
+      await this.sql`CREATE INDEX IF NOT EXISTS idx_migrations_started ON migrations(started_at DESC)`;
+      await this.sql`CREATE INDEX IF NOT EXISTS idx_oauth_state_expires ON oauth_state(expires_at)`;
+      await this.sql`CREATE INDEX IF NOT EXISTS idx_active_tasks_user ON active_tasks(user_id)`;
+      await this.sql`CREATE INDEX IF NOT EXISTS idx_active_tasks_status ON active_tasks(status)`;
+
+      logger.info('Database initialized successfully', {
+        tables_checked: ['credentials', 'migrations', 'sync_tasks', 'synced_tracks',
+                        'sync_progress', 'unmatched_tracks', 'oauth_state', 'active_tasks'],
+        indexes_ensured: 12,
+        schema_version: 'v4_with_user_id_migration'
+      });
     } catch (error) {
-      const errorMsg = error instanceof Error ? error.message : String(error);
-      logger.error(`Database migration failed: ${errorMsg}. UNIQUE constraints may not be created. This will cause ON CONFLICT errors.`);
-      throw new Error(`Critical database migration failure: ${errorMsg}`);
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      logger.error(`Database initialization failed: ${errorMessage}`, {
+        error,
+        stack: error instanceof Error ? error.stack : undefined
+      });
+      throw new Error(`Failed to initialize database schema: ${errorMessage}. Please check database connection and permissions.`);
     }
-
-    // Create indexes for performance (safe now that columns are guaranteed to exist)
-    await this.sql`CREATE INDEX IF NOT EXISTS idx_credentials_user ON credentials(user_id)`;
-    await this.sql`CREATE INDEX IF NOT EXISTS idx_migrations_user ON migrations(user_id)`;
-    await this.sql`CREATE INDEX IF NOT EXISTS idx_sync_tasks_user ON sync_tasks(user_id)`;
-    await this.sql`CREATE INDEX IF NOT EXISTS idx_synced_tracks_user ON synced_tracks(user_id)`;
-    await this.sql`CREATE INDEX IF NOT EXISTS idx_synced_tracks_sync_type ON synced_tracks(sync_type)`;
-    await this.sql`CREATE INDEX IF NOT EXISTS idx_sync_progress_user ON sync_progress(user_id)`;
-    await this.sql`CREATE INDEX IF NOT EXISTS idx_unmatched_user ON unmatched_tracks(user_id)`;
-    await this.sql`CREATE INDEX IF NOT EXISTS idx_unmatched_status ON unmatched_tracks(status)`;
-    await this.sql`CREATE INDEX IF NOT EXISTS idx_migrations_started ON migrations(started_at DESC)`;
-    await this.sql`CREATE INDEX IF NOT EXISTS idx_oauth_state_expires ON oauth_state(expires_at)`;
-    await this.sql`CREATE INDEX IF NOT EXISTS idx_active_tasks_user ON active_tasks(user_id)`;
-    await this.sql`CREATE INDEX IF NOT EXISTS idx_active_tasks_status ON active_tasks(status)`;
-
-    logger.info('Database initialized');
   }
 
   // --- OAuth State Management ---
