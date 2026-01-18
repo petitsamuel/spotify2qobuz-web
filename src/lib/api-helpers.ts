@@ -27,8 +27,13 @@ let dbInitialized = false;
 export async function ensureDbInitialized(): Promise<Storage> {
   const storage = getStorage();
   if (!dbInitialized) {
-    await storage.initDb();
-    dbInitialized = true;
+    try {
+      await storage.initDb();
+      dbInitialized = true;
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      throw new Error(`Cannot initialize database: ${errorMessage}. Please check DATABASE_URL environment variable and database permissions.`);
+    }
   }
   return storage;
 }
