@@ -159,11 +159,11 @@ const migrations: Migration[] = [
           WHERE conname = 'synced_tracks_user_id_spotify_id_sync_type_key'
         ) THEN
           -- First, remove any duplicates that would violate the new constraint
-          DELETE FROM synced_tracks a USING synced_tracks b
-          WHERE a.id < b.id
-            AND a.user_id = b.user_id
-            AND a.spotify_id = b.spotify_id
-            AND a.sync_type = b.sync_type;
+          -- Use ctid instead of id to work with tables that may not have an id column
+          DELETE FROM synced_tracks
+          WHERE ctid NOT IN (
+            SELECT MAX(ctid) FROM synced_tracks GROUP BY user_id, spotify_id, sync_type
+          );
 
           ALTER TABLE synced_tracks
             ADD CONSTRAINT synced_tracks_user_id_spotify_id_sync_type_key
