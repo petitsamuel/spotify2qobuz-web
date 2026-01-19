@@ -220,38 +220,3 @@ export async function withSyncAuth(
     return jsonError('Operation failed', 500);
   }
 }
-
-/**
- * Handles errors from background sync operations.
- * Logs the error and attempts to update task status to failed.
- */
-export async function handleBackgroundSyncError(
-  error: unknown,
-  storage: Storage,
-  taskId: string,
-  userId: string,
-  syncType: string,
-  offset?: number
-): Promise<void> {
-  logger.error('Background sync task failed', {
-    error,
-    taskId,
-    userId,
-    syncType,
-    offset,
-    errorMessage: error instanceof Error ? error.message : String(error),
-    stack: error instanceof Error ? error.stack : undefined,
-  });
-
-  try {
-    await storage.updateActiveTask(taskId, 'failed', undefined, String(error));
-  } catch (updateErr) {
-    logger.error('Failed to record sync failure in database (task state may be inconsistent)', {
-      error: updateErr,
-      taskId,
-      originalError: error,
-      errorMessage: updateErr instanceof Error ? updateErr.message : String(updateErr),
-      stack: updateErr instanceof Error ? updateErr.stack : undefined,
-    });
-  }
-}
