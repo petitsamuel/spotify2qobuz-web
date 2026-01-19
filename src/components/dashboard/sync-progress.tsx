@@ -93,6 +93,7 @@ export function SyncProgress({ taskId, syncType, onComplete }: SyncProgressProps
   const [isContinuing, setIsContinuing] = useState<boolean>(false);
   const retryCountRef = useRef(0);
   const progressRef = useRef<SyncProgressData>({});
+  const seenTracksRef = useRef<Set<string>>(new Set());
   const maxRetries = 3;
 
   // Continue the sync when a chunk completes
@@ -310,11 +311,13 @@ export function SyncProgress({ taskId, syncType, onComplete }: SyncProgressProps
                 <ul className="space-y-1 text-xs text-muted-foreground">
                   {progress.recent_missing.slice(-3).map((track, i) => {
                     const trackKey = `${track.title}-${track.artist}`;
+                    const isNew = !seenTracksRef.current.has(trackKey);
+                    if (isNew) seenTracksRef.current.add(trackKey);
                     return (
                       <li
                         key={trackKey}
-                        className="animate-slide-in"
-                        style={{ animationDelay: `${i * 100}ms` }}
+                        className={isNew ? 'animate-slide-in' : ''}
+                        style={isNew ? { animationDelay: `${i * 100}ms` } : undefined}
                       >
                         {track.title} - {track.artist}
                       </li>
