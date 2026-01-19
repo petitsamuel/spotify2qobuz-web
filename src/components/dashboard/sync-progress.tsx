@@ -247,7 +247,7 @@ export function SyncProgress({ taskId, syncType, onComplete }: SyncProgressProps
           <div>
             <CardTitle>Sync Progress</CardTitle>
             <CardDescription>
-              Syncing {syncType}
+              Syncing {syncType.charAt(0).toUpperCase() + syncType.slice(1)}
             </CardDescription>
           </div>
           <Badge
@@ -269,7 +269,17 @@ export function SyncProgress({ taskId, syncType, onComplete }: SyncProgressProps
             />
             {chunkState && chunkState.totalItems > 0 && (
               <div className="text-xs text-muted-foreground">
-                Overall: {chunkState.offset} / {chunkState.totalItems} items
+                Overall: {chunkState.offset} / {chunkState.totalItems} {syncType === 'albums' ? 'albums' : 'tracks'}
+              </div>
+            )}
+            {syncType === 'playlists' && progress.total_playlists && progress.total_playlists > 0 && (
+              <div className="text-sm font-medium">
+                Playlist {(progress.current_playlist_index ?? 0) + 1} / {progress.total_playlists}
+              </div>
+            )}
+            {syncType === 'albums' && chunkState && chunkState.totalItems > 0 && (
+              <div className="text-sm font-medium">
+                Album {Math.min(chunkState.offset + (chunkState.processedInChunk || 0), chunkState.totalItems)} / {chunkState.totalItems}
               </div>
             )}
             <div className="grid grid-cols-2 gap-4 text-sm">
