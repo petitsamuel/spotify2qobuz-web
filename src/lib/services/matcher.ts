@@ -269,9 +269,22 @@ function isCompilationAlbum(albumName: string): boolean {
 
 export class TrackMatcher {
   private qobuzClient: QobuzClient;
+  private prebuiltIsrcMap: Map<string, number> | null = null;
 
   constructor(qobuzClient: QobuzClient) {
     this.qobuzClient = qobuzClient;
+  }
+
+  /**
+   * Set a pre-built ISRC map for instant lookups without API calls.
+   * Map keys should be normalized ISRCs (uppercase, no hyphens).
+   */
+  setIsrcMap(isrcMap: Map<string, number>): void {
+    // Normalize all keys in the map
+    this.prebuiltIsrcMap = new Map();
+    for (const [isrc, trackId] of isrcMap) {
+      this.prebuiltIsrcMap.set(normalizeIsrc(isrc), trackId);
+    }
   }
 
   /**
@@ -379,6 +392,30 @@ export class TrackMatcher {
   private async matchByIsrc(spotifyTrack: SpotifyTrack): Promise<MatchResult | null> {
     if (!spotifyTrack.isrc) return null;
 
+    const normalizedIsrc = normalizeIsrc(spotifyTrack.isrc);
+
+    // Fast path: check prebuilt ISRC map first (no API call needed)
+    if (this.prebuiltIsrcMap?.has(normalizedIsrc)) {
+      const trackId = this.prebuiltIsrcMap.get(normalizedIsrc)!;
+      logger.info(
+        `ISRC instant match (from cache): ${spotifyTrack.title} by ${spotifyTrack.artist} -> track ID ${trackId}`
+      );
+      // Return minimal track info - the ID is what matters for adding to favorites
+      return {
+        qobuzTrack: {
+          id: trackId,
+          title: spotifyTrack.title,
+          artist: spotifyTrack.artist,
+          album: spotifyTrack.album,
+          duration: spotifyTrack.duration,
+          isrc: spotifyTrack.isrc,
+        },
+        matchType: 'isrc',
+        score: 100,
+      };
+    }
+
+    // Slow path: API search
     const qobuzTrack = await this.qobuzClient.searchByIsrc(
       spotifyTrack.isrc,
       spotifyTrack.title,
@@ -403,73 +440,66 @@ export class TrackMatcher {
   private async matchAlternative(spotifyTrack: SpotifyTrack): Promise<MatchResult | null> {
     const { title, artist, album } = spotifyTrack;
     const durationTolerance = getDurationTolerance(spotifyTrack.duration);
-
-    // Strategy 1: Search with album name for disambiguation
-    if (album) {
-      const candidates = await this.qobuzClient.searchCandidates(title, album);
-      for (const candidate of candidates) {
-        const score = this.scoreCandidate(spotifyTrack, candidate);
-        const durationDiff = Math.abs(spotifyTrack.duration - candidate.duration);
-        if (score >= 65 && durationDiff <= durationTolerance) {
-          logger.info(
-            `Album-based match (score=${score.toFixed(1)}): ` +
-            `${title} by ${artist} -> ${candidate.title} by ${candidate.artist}`
-          );
-          return { qobuzTrack: candidate, matchType: 'fuzzy_album', score };
-        }
-      }
-    }
-
-    // Strategy 2: Clean title aggressively and retry
     const cleanTitle = normalizeAggressive(title);
     const cleanArtist = normalizeAggressive(artist);
-
-    if (cleanTitle !== normalize(title)) {
-      const candidates = await this.qobuzClient.searchCandidates(cleanTitle, cleanArtist);
-      for (const candidate of candidates) {
-        const score = this.scoreCandidate(spotifyTrack, candidate);
-        const durationDiff = Math.abs(spotifyTrack.duration - candidate.duration);
-        if (score >= 65 && durationDiff <= durationTolerance) {
-          logger.info(
-            `Clean title match (score=${score.toFixed(1)}): ` +
-            `${title} by ${artist} -> ${candidate.title} by ${candidate.artist}`
-          );
-          return { qobuzTrack: candidate, matchType: 'fuzzy_clean', score };
-        }
-      }
-    }
-
-    // Strategy 3: Try with primary artist only
     const { primary, featured } = extractFeaturedArtists(artist);
-    if (featured.length > 0) {
-      const candidates = await this.qobuzClient.searchCandidates(title, primary);
+
+    // Build search queries for parallel execution
+    type SearchTask = {
+      type: MatchResult['matchType'];
+      query: [string, string];
+      enabled: boolean;
+    };
+
+    const searchTasks: SearchTask[] = [
+      // Strategy 1: Search with album name for disambiguation
+      { type: 'fuzzy_album', query: [title, album || ''], enabled: !!album },
+      // Strategy 2: Clean title aggressively
+      { type: 'fuzzy_clean', query: [cleanTitle, cleanArtist], enabled: cleanTitle !== normalize(title) },
+      // Strategy 3: Primary artist only
+      { type: 'fuzzy_primary', query: [title, primary], enabled: featured.length > 0 },
+      // Strategy 4: Title-only search
+      { type: 'fuzzy_title', query: [title, ''], enabled: true },
+    ];
+
+    // Execute all enabled searches in parallel
+    const enabledTasks = searchTasks.filter(t => t.enabled);
+    const searchPromises = enabledTasks.map(task =>
+      this.qobuzClient.searchCandidates(task.query[0], task.query[1])
+        .then(candidates => ({ type: task.type, candidates }))
+        .catch(() => ({ type: task.type, candidates: [] }))
+    );
+
+    const results = await Promise.all(searchPromises);
+
+    // Process results in priority order (album > clean > primary > title)
+    for (const { type, candidates } of results) {
       for (const candidate of candidates) {
-        const score = this.scoreCandidate(spotifyTrack, candidate);
         const durationDiff = Math.abs(spotifyTrack.duration - candidate.duration);
-        if (score >= 65 && durationDiff <= durationTolerance) {
-          logger.info(
-            `Primary artist match (score=${score.toFixed(1)}): ` +
-            `${title} by ${artist} -> ${candidate.title} by ${candidate.artist}`
-          );
-          return { qobuzTrack: candidate, matchType: 'fuzzy_primary', score };
+
+        if (type === 'fuzzy_title') {
+          // Special scoring for title-focused search
+          const titleScore = bestFuzzyScore(normalize(title), normalize(candidate.title));
+          const artistScore = bestFuzzyScore(normalize(artist), normalize(candidate.artist));
+          if (titleScore >= 92 && artistScore >= 40 && durationDiff <= 3000) {
+            const score = titleScore * 0.7 + artistScore * 0.3;
+            logger.info(
+              `Title-focused match (title=${titleScore.toFixed(1)}, artist=${artistScore.toFixed(1)}): ` +
+              `${title} by ${artist} -> ${candidate.title} by ${candidate.artist}`
+            );
+            return { qobuzTrack: candidate, matchType: type, score };
+          }
+        } else {
+          // Standard scoring for other strategies
+          const score = this.scoreCandidate(spotifyTrack, candidate);
+          if (score >= 65 && durationDiff <= durationTolerance) {
+            logger.info(
+              `${type} match (score=${score.toFixed(1)}): ` +
+              `${title} by ${artist} -> ${candidate.title} by ${candidate.artist}`
+            );
+            return { qobuzTrack: candidate, matchType: type, score };
+          }
         }
-      }
-    }
-
-    // Strategy 4: Title search with relaxed artist matching
-    const titleOnlyCandidates = await this.qobuzClient.searchCandidates(title, '');
-    for (const candidate of titleOnlyCandidates) {
-      const titleScore = bestFuzzyScore(normalize(title), normalize(candidate.title));
-      const artistScore = bestFuzzyScore(normalize(artist), normalize(candidate.artist));
-      const durationDiff = Math.abs(spotifyTrack.duration - candidate.duration);
-
-      if (titleScore >= 92 && artistScore >= 40 && durationDiff <= 3000) {
-        const score = titleScore * 0.7 + artistScore * 0.3;
-        logger.info(
-          `Title-focused match (title=${titleScore.toFixed(1)}, artist=${artistScore.toFixed(1)}): ` +
-          `${title} by ${artist} -> ${candidate.title} by ${candidate.artist}`
-        );
-        return { qobuzTrack: candidate, matchType: 'fuzzy_title', score };
       }
     }
 

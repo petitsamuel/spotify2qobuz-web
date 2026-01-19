@@ -461,6 +461,9 @@ export class AsyncSyncService {
       const qobuzIsrcMap = await this.qobuzClient.getFavoriteTracksWithIsrc();
       const existingFavorites = new Set(qobuzIsrcMap.values());
 
+      // Pass ISRC map to matcher for instant lookups
+      this.matcher.setIsrcMap(qobuzIsrcMap);
+
       this.progress.update({
         total_playlists: 1,
         current_playlist: 'Saved Tracks',
@@ -773,6 +776,9 @@ export class AsyncSyncService {
       logger.info(`Pre-fetching Qobuz favorites for chunk starting at ${offset}...`);
       const qobuzIsrcMap = await this.qobuzClient.getFavoriteTracksWithIsrc();
       const existingFavorites = new Set(qobuzIsrcMap.values());
+
+      // Pass ISRC map to matcher for instant lookups
+      this.matcher.setIsrcMap(qobuzIsrcMap);
 
       this.progress.update({
         total_playlists: 1,
