@@ -38,6 +38,9 @@ export function SyncControls({ onSyncStarted, disabled }: SyncControlsProps) {
     onSuccess: (data, syncType) => {
       if (data.task_id) {
         onSyncStarted(data.task_id, syncType);
+      } else if (data.active_task_id && data.sync_type) {
+        // A sync is already running - reconnect to it
+        onSyncStarted(data.active_task_id, data.sync_type);
       }
     },
   });

@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useCallback } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { ConnectionStatus } from '@/components/dashboard/connection-status';
 import { SyncControls } from '@/components/dashboard/sync-controls';
@@ -16,10 +16,10 @@ interface ActiveTask {
 }
 
 export default function DashboardPage() {
-  const [activeSync, setActiveSync] = useState<{ taskId: string; syncType: string } | null>(null);
+  const [manualActiveSync, setManualActiveSync] = useState<{ taskId: string; syncType: string } | null>(null);
 
   // Check for existing active sync on mount
-  const { data: existingTask } = useQuery<ActiveTask | null>({
+  const { data: existingTask, isLoading: isCheckingActiveTask } = useQuery<ActiveTask | null>({
     queryKey: ['activeTask'],
     queryFn: async () => {
       const res = await fetch('/api/sync/active');
@@ -27,25 +27,24 @@ export default function DashboardPage() {
       const data = await res.json();
       return data.task_id ? data : null;
     },
-    enabled: !activeSync,
+    enabled: !manualActiveSync,
+    staleTime: 0, // Always refetch on mount
+    refetchOnWindowFocus: true, // Refetch when user returns to the page
   });
 
-  useEffect(() => {
-    if (existingTask?.task_id && !activeSync) {
-      setActiveSync({
-        taskId: existingTask.task_id,
-        syncType: existingTask.sync_type,
-      });
-    }
-  }, [existingTask, activeSync]);
+  // Derive activeSync from either manual state or query data
+  const activeSync = manualActiveSync ?? (existingTask ? {
+    taskId: existingTask.task_id,
+    syncType: existingTask.sync_type,
+  } : null);
 
-  const handleSyncStarted = (taskId: string, syncType: string) => {
-    setActiveSync({ taskId, syncType });
-  };
+  const handleSyncStarted = useCallback((taskId: string, syncType: string) => {
+    setManualActiveSync({ taskId, syncType });
+  }, []);
 
-  const handleSyncComplete = () => {
-    setActiveSync(null);
-  };
+  const handleSyncComplete = useCallback(() => {
+    setManualActiveSync(null);
+  }, []);
 
   return (
     <div className="space-y-6">
@@ -70,7 +69,7 @@ export default function DashboardPage() {
         ) : (
           <SyncControls
             onSyncStarted={handleSyncStarted}
-            disabled={!!activeSync}
+            disabled={isCheckingActiveTask}
           />
         )}
 

@@ -780,7 +780,7 @@ export class Storage {
   } | null> {
     const result = await this.sql`
       SELECT * FROM active_tasks
-      WHERE user_id = ${userId} AND status IN ('starting', 'running')
+      WHERE user_id = ${userId} AND status IN ('starting', 'running', 'chunk_complete')
       ORDER BY created_at DESC
       LIMIT 1
     `;
