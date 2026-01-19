@@ -8,6 +8,7 @@ import { Storage } from '../db/storage';
 import { SpotifyClient } from './spotify';
 import { QobuzClient } from './qobuz';
 import { logger } from '../logger';
+import { MissingTrack } from '../types';
 
 // How many items to process per chunk (tuned for ~30s execution time)
 export const CHUNK_SIZE = 50;
@@ -63,6 +64,10 @@ export async function runSyncChunk(
   // Get cumulative stats from previous chunks
   const cumulativeStats = await getCumulativeStats(storage, migrationId);
 
+  // Retrieve existing recent_missing from previous chunk progress
+  const existingTask = await storage.getActiveTask(taskId);
+  const existingRecentMissing = (existingTask?.progress as { recent_missing?: MissingTrack[] } | null)?.recent_missing;
+
   // Create cancellation checker that queries the database
   const checkCancelled = async (): Promise<boolean> => {
     const task = await storage.getActiveTask(taskId);
@@ -76,7 +81,8 @@ export async function runSyncChunk(
       await storage.updateActiveTask(taskId, 'running', progress as unknown as Record<string, unknown>);
       await storage.updateTask(taskId, 'running', progress as unknown as Record<string, unknown>);
     },
-    checkCancelled
+    checkCancelled,
+    existingRecentMissing
   );
 
   try {

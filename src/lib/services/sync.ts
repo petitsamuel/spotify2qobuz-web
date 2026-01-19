@@ -189,8 +189,11 @@ export class ProgressTracker {
   private maxRecentMissing = 20;
   private callback?: ProgressCallback;
 
-  constructor(callback?: ProgressCallback) {
+  constructor(callback?: ProgressCallback, initialRecentMissing?: MissingTrack[]) {
     this.callback = callback;
+    if (initialRecentMissing) {
+      this.recent_missing = initialRecentMissing.slice(-this.maxRecentMissing);
+    }
   }
 
   update(updates: Partial<SyncProgress>): void {
@@ -262,12 +265,13 @@ export class AsyncSyncService {
     spotifyClient: SpotifyClient,
     qobuzClient: QobuzClient,
     progressCallback?: ProgressCallback,
-    cancellationChecker?: CancellationChecker
+    cancellationChecker?: CancellationChecker,
+    initialRecentMissing?: MissingTrack[]
   ) {
     this.spotifyClient = spotifyClient;
     this.qobuzClient = qobuzClient;
     this.matcher = new TrackMatcher(qobuzClient);
-    this.progress = new ProgressTracker(progressCallback);
+    this.progress = new ProgressTracker(progressCallback, initialRecentMissing);
     this.checkCancelled = cancellationChecker;
   }
 
