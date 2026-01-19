@@ -805,27 +805,24 @@ export class Storage {
   }
 
   async cleanupStaleActiveTasks(): Promise<number> {
-    // Find stale tasks (no update in 10 minutes) and mark them as interrupted
-    const staleTasks = await this.sql`
-      SELECT id, migration_id FROM active_tasks
+    // Atomically find and update stale tasks (no activity for 10 minutes) in a single query
+    // This prevents race conditions where a task could be updated between SELECT and UPDATE
+    const updatedTasks = await this.sql`
+      UPDATE active_tasks
+      SET status = 'interrupted',
+          error = 'Task ' || id || ' timed out - no activity for 10 minutes',
+          updated_at = NOW()
       WHERE status IN ('starting', 'running', 'chunk_complete')
         AND updated_at < NOW() - INTERVAL '10 minutes'
+      RETURNING id, migration_id
     `;
-    const rows = this.toRows(staleTasks);
+    const rows = this.toRows(updatedTasks);
 
     if (rows.length === 0) return 0;
 
-    const taskIds = rows.map((r) => String(r.id));
     const migrationIds = rows.map((r) => Number(r.migration_id)).filter((id) => id > 0);
 
-    // Update active_tasks to interrupted
-    await this.sql`
-      UPDATE active_tasks
-      SET status = 'interrupted', error = 'Task timed out - no activity for 10 minutes', updated_at = NOW()
-      WHERE id = ANY(${taskIds})
-    `;
-
-    // Also update corresponding migrations to interrupted
+    // Update corresponding migrations to interrupted
     if (migrationIds.length > 0) {
       await this.sql`
         UPDATE migrations
