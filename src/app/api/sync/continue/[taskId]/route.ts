@@ -3,7 +3,7 @@
  * Continues a chunked sync from where it left off.
  */
 
-import { NextRequest } from 'next/server';
+import { NextRequest, after } from 'next/server';
 import { withSyncAuth, getBothClients, jsonError } from '@/lib/api-helpers';
 import { runSyncChunk } from '@/lib/services/chunk-sync';
 import { logger } from '@/lib/logger';
@@ -46,38 +46,42 @@ export async function POST(
     await storage.updateActiveTask(taskId, 'running');
     await storage.updateTask(taskId, 'running');
 
-    // Run the next chunk in background (fire and forget, but handle errors)
-    // Note: This runs AFTER the response is sent, so errors here don't affect the HTTP response
-    runSyncChunk(
-      userId,
-      taskId,
-      task.sync_type,
-      task.dry_run,
-      task.chunkState.offset, // Continue from where we left off
-      storage,
-      clients.spotify,
-      clients.qobuz,
-      task.migration_id
-    ).catch(async (err) => {
-      logger.error('Background sync chunk continuation failed', {
-        error: err,
-        taskId,
-        userId,
-        syncType: task.sync_type,
-        offset: task.chunkState?.offset,
-        errorMessage: err instanceof Error ? err.message : String(err),
-        stack: err instanceof Error ? err.stack : undefined,
-      });
+    // Use Next.js after() to run sync after response is sent
+    // This ensures Vercel keeps the function alive until the background work completes
+    after(async () => {
       try {
-        await storage.updateActiveTask(taskId, 'failed', undefined, String(err));
-      } catch (updateErr) {
-        logger.error('Failed to record sync failure in database (task state may be inconsistent)', {
-          error: updateErr,
+        await runSyncChunk(
+          userId,
           taskId,
-          originalError: err,
-          errorMessage: updateErr instanceof Error ? updateErr.message : String(updateErr),
-          stack: updateErr instanceof Error ? updateErr.stack : undefined,
+          task.sync_type,
+          task.dry_run,
+          task.chunkState!.offset, // Continue from where we left off
+          storage,
+          clients.spotify,
+          clients.qobuz,
+          task.migration_id
+        );
+      } catch (err) {
+        logger.error('Background sync chunk continuation failed', {
+          error: err,
+          taskId,
+          userId,
+          syncType: task.sync_type,
+          offset: task.chunkState?.offset,
+          errorMessage: err instanceof Error ? err.message : String(err),
+          stack: err instanceof Error ? err.stack : undefined,
         });
+        try {
+          await storage.updateActiveTask(taskId, 'failed', undefined, String(err));
+        } catch (updateErr) {
+          logger.error('Failed to record sync failure in database (task state may be inconsistent)', {
+            error: updateErr,
+            taskId,
+            originalError: err,
+            errorMessage: updateErr instanceof Error ? updateErr.message : String(updateErr),
+            stack: updateErr instanceof Error ? updateErr.stack : undefined,
+          });
+        }
       }
     });
 
