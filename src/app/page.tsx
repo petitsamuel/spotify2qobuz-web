@@ -45,6 +45,8 @@ export default function DashboardPage() {
 
   const handleSyncComplete = useCallback(() => {
     setManualActiveSync(null);
+    // Clear the activeTask cache so stale data doesn't keep the modal open
+    queryClient.setQueryData(['activeTask'], null);
     // Refresh Qobuz stats to show updated counts after sync
     queryClient.invalidateQueries({ queryKey: ['qobuzStats'] });
   }, [queryClient]);
