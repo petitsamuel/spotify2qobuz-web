@@ -14,6 +14,12 @@ export async function GET() {
 
     const storage = await ensureDbInitialized();
 
+    // Clean up any stale tasks before checking for running ones
+    const cleanedUp = await storage.cleanupStaleActiveTasks();
+    if (cleanedUp > 0) {
+      logger.info(`Cleaned up ${cleanedUp} stale task(s)`);
+    }
+
     const task = await storage.getRunningTask(userId);
     if (!task) {
       return Response.json({});

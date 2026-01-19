@@ -804,13 +804,37 @@ export class Storage {
     await this.sql`DELETE FROM active_tasks WHERE id = ${taskId}`;
   }
 
-  async cleanupStaleActiveTasks(): Promise<void> {
+  async cleanupStaleActiveTasks(): Promise<number> {
+    // Find stale tasks (no update in 10 minutes) and mark them as interrupted
+    const staleTasks = await this.sql`
+      SELECT id, migration_id FROM active_tasks
+      WHERE status IN ('starting', 'running', 'chunk_complete')
+        AND updated_at < NOW() - INTERVAL '10 minutes'
+    `;
+    const rows = this.toRows(staleTasks);
+
+    if (rows.length === 0) return 0;
+
+    const taskIds = rows.map((r) => String(r.id));
+    const migrationIds = rows.map((r) => Number(r.migration_id)).filter((id) => id > 0);
+
+    // Update active_tasks to interrupted
     await this.sql`
       UPDATE active_tasks
-      SET status = 'failed', error = 'Task timed out', updated_at = NOW()
-      WHERE status IN ('starting', 'running')
-        AND updated_at < NOW() - INTERVAL '1 hour'
+      SET status = 'interrupted', error = 'Task timed out - no activity for 10 minutes', updated_at = NOW()
+      WHERE id = ANY(${taskIds})
     `;
+
+    // Also update corresponding migrations to interrupted
+    if (migrationIds.length > 0) {
+      await this.sql`
+        UPDATE migrations
+        SET status = 'interrupted', completed_at = NOW()
+        WHERE id = ANY(${migrationIds}) AND status = 'running'
+      `;
+    }
+
+    return rows.length;
   }
 
   // --- Synced Track Tracking ---
