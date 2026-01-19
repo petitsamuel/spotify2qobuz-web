@@ -89,6 +89,8 @@ export function RecentMigrations() {
                       ? 'default'
                       : migration.status === 'failed'
                       ? 'destructive'
+                      : migration.status === 'interrupted'
+                      ? 'outline'
                       : 'secondary'
                   }
                 >

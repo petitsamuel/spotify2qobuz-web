@@ -115,6 +115,8 @@ export function MigrationTable() {
                         ? 'default'
                         : migration.status === 'failed'
                         ? 'destructive'
+                        : migration.status === 'interrupted'
+                        ? 'outline'
                         : 'secondary'
                     }
                   >
