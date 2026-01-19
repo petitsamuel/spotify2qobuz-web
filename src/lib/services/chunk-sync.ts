@@ -228,6 +228,7 @@ export async function runSyncChunk(
       logger.info(`Sync completed: ${taskId}`);
     }
   } catch (error) {
+    // Update database to reflect failure
     await storage.updateMigration(migrationId, {
       completed_at: new Date().toISOString(),
       status: 'failed',
@@ -237,6 +238,21 @@ export async function runSyncChunk(
     await storage.updateActiveTask(taskId, 'failed', undefined, String(error));
     await storage.updateTask(taskId, 'failed');
 
-    logger.error(`Chunk sync failed: ${error}`);
+    // Log with comprehensive context for debugging
+    logger.error('Chunk sync failed', {
+      error,
+      taskId,
+      userId,
+      syncType,
+      offset,
+      chunkSize: CHUNK_SIZE,
+      migrationId,
+      errorMessage: error instanceof Error ? error.message : String(error),
+      stack: error instanceof Error ? error.stack : undefined,
+      errorType: error instanceof Error ? error.constructor.name : typeof error,
+    });
+
+    // Re-throw to let caller handle the error
+    throw error;
   }
 }
