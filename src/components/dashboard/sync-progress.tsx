@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState, useCallback, useRef } from 'react';
+import Link from 'next/link';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Progress } from '@/components/ui/progress';
@@ -252,7 +253,12 @@ export function SyncProgress({ taskId, syncType, onComplete }: SyncProgressProps
             </div>
             {progress.recent_missing && progress.recent_missing.length > 0 && (
               <div className="rounded-md bg-muted p-3">
-                <p className="mb-2 text-sm font-medium">Recent missing tracks:</p>
+                <div className="mb-2 flex items-center justify-between">
+                  <p className="text-sm font-medium">Recent missing tracks:</p>
+                  <Link href="/review" className="text-xs text-primary hover:underline">
+                    Review all
+                  </Link>
+                </div>
                 <ul className="space-y-1 text-xs text-muted-foreground">
                   {progress.recent_missing.slice(-3).map((track, i) => (
                     <li key={i}>
@@ -288,7 +294,14 @@ export function SyncProgress({ taskId, syncType, onComplete }: SyncProgressProps
                 {report.fuzzy_matches ?? 0}
               </div>
             </div>
-            <Button onClick={onComplete}>Done</Button>
+            <div className="flex gap-2">
+              <Button onClick={onComplete}>Done</Button>
+              {((report.tracks_not_matched ?? report.albums_not_matched ?? 0) > 0) && (
+                <Button variant="outline" asChild>
+                  <Link href="/review">Review Unmatched</Link>
+                </Button>
+              )}
+            </div>
           </div>
         )}
 

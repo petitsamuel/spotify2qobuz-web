@@ -828,6 +828,12 @@ export class Storage {
       VALUES (${userId}, ${spotifyId}, ${qobuzId}, ${syncType})
       ON CONFLICT (user_id, spotify_id, sync_type) DO UPDATE SET qobuz_id = ${qobuzId}, synced_at = NOW()
     `;
+
+    // Clean up from unmatched_tracks if it was previously there
+    await this.sql`
+      DELETE FROM unmatched_tracks
+      WHERE user_id = ${userId} AND spotify_id = ${spotifyId} AND sync_type = ${syncType}
+    `;
   }
 
   async getSyncedTrackIds(userId: string, syncType: string): Promise<Set<string>> {

@@ -28,10 +28,26 @@ export async function GET(
         return jsonError('Task not found', 404);
       }
 
+      // Get cumulative stats from migration record
+      let progress = activeTask.progress;
+      if (activeTask.migration_id) {
+        const migration = await storage.getMigration(activeTask.migration_id);
+        if (migration) {
+          // Merge cumulative stats from migration with chunk progress
+          progress = {
+            ...progress,
+            tracks_matched: migration.tracks_matched || 0,
+            tracks_not_matched: migration.tracks_not_matched || 0,
+            isrc_matches: migration.isrc_matches || 0,
+            fuzzy_matches: migration.fuzzy_matches || 0,
+          };
+        }
+      }
+
       const response: Record<string, unknown> = {
         task_id: taskId,
         status: activeTask.status,
-        progress: activeTask.progress,
+        progress,
         report: activeTask.report,
         error: activeTask.error,
       };

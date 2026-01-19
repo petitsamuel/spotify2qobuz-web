@@ -9,7 +9,7 @@ import type { Suggestion } from '../types';
 
 export interface MatchResult {
   qobuzTrack: QobuzTrack;
-  matchType: 'isrc' | 'fuzzy' | 'fuzzy_album' | 'fuzzy_clean' | 'fuzzy_primary' | 'fuzzy_title';
+  matchType: 'isrc' | 'fuzzy' | 'fuzzy_album' | 'fuzzy_clean' | 'fuzzy_primary' | 'fuzzy_artist' | 'fuzzy_title';
   score: number;
 }
 
@@ -18,7 +18,8 @@ const TITLE_THRESHOLD = 75;
 const ARTIST_THRESHOLD = 70;
 const DURATION_TOLERANCE_MS = 10000;
 const MIN_COMBINED_SCORE = 78;
-const MIN_ARTIST_SCORE_FOR_SUGGESTION = 50;
+const MIN_ARTIST_SCORE_FOR_SUGGESTION = 60; // Increased from 50 to reduce bad suggestions
+const MIN_TOKEN_OVERLAP_FOR_SUGGESTION = 1; // Require at least one common token in artist names
 
 /**
  * Normalize ISRC codes for comparison.
@@ -154,6 +155,35 @@ export function bestFuzzyScore(s1: string, s2: string): number {
   );
 }
 
+// Localized spelling variations
+const LOCALIZED_SPELLINGS: [RegExp, string][] = [
+  [/colour/g, 'color'],
+  [/favour/g, 'favor'],
+  [/behaviour/g, 'behavior'],
+  [/honour/g, 'honor'],
+  [/neighbour/g, 'neighbor'],
+  [/centre/g, 'center'],
+  [/theatre/g, 'theater'],
+  [/defence/g, 'defense'],
+  [/licence/g, 'license'],
+  [/grey/g, 'gray'],
+  [/catalogue/g, 'catalog'],
+  [/dialogue/g, 'dialog'],
+  [/travelling/g, 'traveling'],
+  [/cancelled/g, 'canceled'],
+];
+
+/**
+ * Check if two strings have overlapping tokens (words).
+ * Returns the count of common tokens.
+ */
+function getTokenOverlap(s1: string, s2: string): number {
+  if (!s1 || !s2) return 0;
+  const tokens1 = new Set(s1.toLowerCase().split(/\s+/).filter(t => t.length > 1));
+  const tokens2 = new Set(s2.toLowerCase().split(/\s+/).filter(t => t.length > 1));
+  return [...tokens1].filter(t => tokens2.has(t)).length;
+}
+
 /**
  * Normalize string for comparison.
  */
@@ -164,6 +194,11 @@ function normalize(s: string): string {
 
   // Remove accents
   result = result.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+
+  // Apply localized spelling normalization
+  for (const [pattern, replacement] of LOCALIZED_SPELLINGS) {
+    result = result.replace(pattern, replacement);
+  }
 
   // Remove featuring info in parentheses
   result = result.replace(FEAT_PATTERN, '');
@@ -368,22 +403,43 @@ export class TrackMatcher {
     const altResult = await this.matchAlternative(spotifyTrack);
     if (altResult) return [altResult, []];
 
-    // No match - return suggestions
+    // No match - return suggestions with stricter filtering
     const suggestions: Suggestion[] = [];
     for (const sc of scoredCandidates.slice(0, 10)) {
-      if (sc.score >= suggestionThreshold && sc.artistScore >= MIN_ARTIST_SCORE_FOR_SUGGESTION) {
-        suggestions.push({
-          qobuz_id: sc.candidate.id,
-          title: sc.candidate.title,
-          artist: sc.candidate.artist,
-          album: sc.candidate.album,
-          score: Math.round(sc.score * 10) / 10,
-          title_score: Math.round(sc.titleScore * 10) / 10,
-          artist_score: Math.round(sc.artistScore * 10) / 10,
-          duration_diff_sec: Math.round(sc.durationDiff / 100) / 10,
-        });
-        if (suggestions.length >= 5) break;
+      // Check basic score thresholds
+      if (sc.score < suggestionThreshold || sc.artistScore < MIN_ARTIST_SCORE_FOR_SUGGESTION) {
+        continue;
       }
+
+      // Check for token overlap in artist names to filter out completely unrelated artists
+      // Skip this check if artistScore is very high (>= 85) as that indicates a good match
+      if (sc.artistScore < 85) {
+        const tokenOverlap = getTokenOverlap(spotifyTrack.artist, sc.candidate.artist);
+        if (tokenOverlap < MIN_TOKEN_OVERLAP_FOR_SUGGESTION) {
+          // Also check if any Spotify artist appears in the candidate artist
+          const allSpotifyArtists = spotifyTrack.allArtists?.length > 0
+            ? spotifyTrack.allArtists
+            : [spotifyTrack.artist];
+          const hasAnyOverlap = allSpotifyArtists.some(
+            sArtist => getTokenOverlap(sArtist, sc.candidate.artist) >= MIN_TOKEN_OVERLAP_FOR_SUGGESTION
+          );
+          if (!hasAnyOverlap) {
+            continue;
+          }
+        }
+      }
+
+      suggestions.push({
+        qobuz_id: sc.candidate.id,
+        title: sc.candidate.title,
+        artist: sc.candidate.artist,
+        album: sc.candidate.album,
+        score: Math.round(sc.score * 10) / 10,
+        title_score: Math.round(sc.titleScore * 10) / 10,
+        artist_score: Math.round(sc.artistScore * 10) / 10,
+        duration_diff_sec: Math.round(sc.durationDiff / 100) / 10,
+      });
+      if (suggestions.length >= 5) break;
     }
 
     return [null, suggestions];
@@ -451,6 +507,10 @@ export class TrackMatcher {
       enabled: boolean;
     };
 
+    // Build partial title for artist-focused search
+    const titleWords = title.split(/\s+/).filter(w => w.length > 2);
+    const partialTitle = titleWords.length > 0 ? titleWords.slice(0, 2).join(' ') : '';
+
     const searchTasks: SearchTask[] = [
       // Strategy 1: Search with album name for disambiguation
       { type: 'fuzzy_album', query: [title, album || ''], enabled: !!album },
@@ -458,7 +518,9 @@ export class TrackMatcher {
       { type: 'fuzzy_clean', query: [cleanTitle, cleanArtist], enabled: cleanTitle !== normalize(title) },
       // Strategy 3: Primary artist only
       { type: 'fuzzy_primary', query: [title, primary], enabled: featured.length > 0 },
-      // Strategy 4: Title-only search
+      // Strategy 4: Artist-focused search - search by artist with first word(s) of title
+      { type: 'fuzzy_artist', query: [partialTitle, artist], enabled: partialTitle.length > 0 },
+      // Strategy 5: Title-only search
       { type: 'fuzzy_title', query: [title, ''], enabled: true },
     ];
 
@@ -472,19 +534,29 @@ export class TrackMatcher {
 
     const results = await Promise.all(searchPromises);
 
-    // Process results in priority order (album > clean > primary > title)
+    // Process results in priority order (album > clean > primary > artist > title)
     for (const { type, candidates } of results) {
       for (const candidate of candidates) {
         const durationDiff = Math.abs(spotifyTrack.duration - candidate.duration);
+        const titleScore = bestFuzzyScore(normalize(title), normalize(candidate.title));
+        const artistScore = bestFuzzyScore(normalize(artist), normalize(candidate.artist));
 
         if (type === 'fuzzy_title') {
           // Special scoring for title-focused search
-          const titleScore = bestFuzzyScore(normalize(title), normalize(candidate.title));
-          const artistScore = bestFuzzyScore(normalize(artist), normalize(candidate.artist));
           if (titleScore >= 92 && artistScore >= 40 && durationDiff <= 3000) {
             const score = titleScore * 0.7 + artistScore * 0.3;
             logger.info(
               `Title-focused match (title=${titleScore.toFixed(1)}, artist=${artistScore.toFixed(1)}): ` +
+              `${title} by ${artist} -> ${candidate.title} by ${candidate.artist}`
+            );
+            return { qobuzTrack: candidate, matchType: type, score };
+          }
+        } else if (type === 'fuzzy_artist') {
+          // Artist-focused: require strong artist match but more flexible title matching
+          if (artistScore >= 85 && titleScore >= 70 && durationDiff <= durationTolerance) {
+            const score = titleScore * 0.4 + artistScore * 0.6;
+            logger.info(
+              `Artist-focused match (title=${titleScore.toFixed(1)}, artist=${artistScore.toFixed(1)}): ` +
               `${title} by ${artist} -> ${candidate.title} by ${candidate.artist}`
             );
             return { qobuzTrack: candidate, matchType: type, score };
