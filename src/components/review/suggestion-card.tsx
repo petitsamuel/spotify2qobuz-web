@@ -34,7 +34,7 @@ export function SuggestionCard({ suggestion, onSelect }: SuggestionCardProps) {
           </div>
           <div className="flex flex-col items-end gap-1">
             <span className="text-xs text-muted-foreground">
-              {Math.round(suggestion.score * 100)}% match
+              {Math.round(suggestion.score)}% match
             </span>
             <Button size="sm" onClick={() => onSelect(suggestion.qobuz_id)}>
               Select
