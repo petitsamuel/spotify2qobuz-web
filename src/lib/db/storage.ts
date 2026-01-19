@@ -325,12 +325,17 @@ export class Storage {
         END $$;
       `;
 
-      // Deduplicate credentials (keep most recent by id - higher id = newer)
+      // Deduplicate credentials (keep most recent row by ctid - works even if id column doesn't exist)
       const credentialsDedup = await this.sql`
-        WITH deleted AS (
-          DELETE FROM credentials a USING credentials b
-          WHERE a.id < b.id AND a.user_id = b.user_id AND a.service = b.service
-          RETURNING a.id
+        WITH duplicates AS (
+          SELECT ctid FROM credentials
+          WHERE ctid NOT IN (
+            SELECT MAX(ctid) FROM credentials GROUP BY user_id, service
+          )
+        ),
+        deleted AS (
+          DELETE FROM credentials WHERE ctid IN (SELECT ctid FROM duplicates)
+          RETURNING *
         )
         SELECT COUNT(*) as count FROM deleted
       `;
@@ -357,12 +362,17 @@ export class Storage {
 
       // --- SYNCED_TRACKS TABLE ---
 
-      // Deduplicate synced_tracks (keep most recent by id)
+      // Deduplicate synced_tracks (keep most recent row by ctid - works even if id column doesn't exist)
       const syncedTracksDedup = await this.sql`
-        WITH deleted AS (
-          DELETE FROM synced_tracks a USING synced_tracks b
-          WHERE a.id < b.id AND a.user_id = b.user_id AND a.spotify_id = b.spotify_id AND a.sync_type = b.sync_type
-          RETURNING a.id
+        WITH duplicates AS (
+          SELECT ctid FROM synced_tracks
+          WHERE ctid NOT IN (
+            SELECT MAX(ctid) FROM synced_tracks GROUP BY user_id, spotify_id, sync_type
+          )
+        ),
+        deleted AS (
+          DELETE FROM synced_tracks WHERE ctid IN (SELECT ctid FROM duplicates)
+          RETURNING *
         )
         SELECT COUNT(*) as count FROM deleted
       `;
@@ -389,12 +399,17 @@ export class Storage {
 
       // --- SYNC_PROGRESS TABLE ---
 
-      // Deduplicate sync_progress (keep most recent by id)
+      // Deduplicate sync_progress (keep most recent row by ctid - works even if id column doesn't exist)
       const syncProgressDedup = await this.sql`
-        WITH deleted AS (
-          DELETE FROM sync_progress a USING sync_progress b
-          WHERE a.id < b.id AND a.user_id = b.user_id AND a.sync_type = b.sync_type
-          RETURNING a.id
+        WITH duplicates AS (
+          SELECT ctid FROM sync_progress
+          WHERE ctid NOT IN (
+            SELECT MAX(ctid) FROM sync_progress GROUP BY user_id, sync_type
+          )
+        ),
+        deleted AS (
+          DELETE FROM sync_progress WHERE ctid IN (SELECT ctid FROM duplicates)
+          RETURNING *
         )
         SELECT COUNT(*) as count FROM deleted
       `;
@@ -421,12 +436,17 @@ export class Storage {
 
       // --- UNMATCHED_TRACKS TABLE ---
 
-      // Deduplicate unmatched_tracks (keep most recent by id)
+      // Deduplicate unmatched_tracks (keep most recent row by ctid - works even if id column doesn't exist)
       const unmatchedTracksDedup = await this.sql`
-        WITH deleted AS (
-          DELETE FROM unmatched_tracks a USING unmatched_tracks b
-          WHERE a.id < b.id AND a.user_id = b.user_id AND a.spotify_id = b.spotify_id AND a.sync_type = b.sync_type
-          RETURNING a.id
+        WITH duplicates AS (
+          SELECT ctid FROM unmatched_tracks
+          WHERE ctid NOT IN (
+            SELECT MAX(ctid) FROM unmatched_tracks GROUP BY user_id, spotify_id, sync_type
+          )
+        ),
+        deleted AS (
+          DELETE FROM unmatched_tracks WHERE ctid IN (SELECT ctid FROM duplicates)
+          RETURNING *
         )
         SELECT COUNT(*) as count FROM deleted
       `;
