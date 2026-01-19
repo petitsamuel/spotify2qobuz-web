@@ -70,32 +70,36 @@ export function RecentMigrations() {
             >
               <div>
                 <div className="flex items-center gap-2">
-                  <span className="font-medium capitalize">{migration.sync_type}</span>
+                  <p className="text-sm text-muted-foreground">
+                    {new Date(migration.started_at).toLocaleDateString()}{' '}
+                    {new Date(migration.started_at).toLocaleTimeString()}
+                  </p>
                   {migration.dry_run && (
                     <Badge variant="outline" className="text-xs">
                       Dry run
                     </Badge>
                   )}
                 </div>
-                <p className="text-xs text-muted-foreground">
-                  {new Date(migration.started_at).toLocaleDateString()}{' '}
-                  {new Date(migration.started_at).toLocaleTimeString()}
-                </p>
               </div>
               <div className="text-right">
-                <Badge
-                  variant={
-                    migration.status === 'completed'
-                      ? 'default'
-                      : migration.status === 'failed'
-                      ? 'destructive'
-                      : migration.status === 'interrupted'
-                      ? 'outline'
-                      : 'secondary'
-                  }
-                >
-                  {migration.status}
-                </Badge>
+                <div className="flex items-center justify-end gap-1">
+                  <Badge variant="outline" className="text-xs capitalize">
+                    {migration.sync_type}
+                  </Badge>
+                  <Badge
+                    variant={
+                      migration.status === 'completed'
+                        ? 'default'
+                        : migration.status === 'failed'
+                        ? 'destructive'
+                        : migration.status === 'interrupted'
+                        ? 'outline'
+                        : 'secondary'
+                    }
+                  >
+                    {migration.status}
+                  </Badge>
+                </div>
                 {migration.status === 'completed' && (
                   <p className="text-xs text-muted-foreground">
                     {migration.tracks_matched} matched
