@@ -30,6 +30,7 @@ export async function GET(
 
       // Get cumulative stats from migration record
       let progress = activeTask.progress;
+      let report = activeTask.report;
       if (activeTask.migration_id) {
         const migration = await storage.getMigration(activeTask.migration_id);
         if (migration) {
@@ -41,6 +42,19 @@ export async function GET(
             isrc_matches: migration.isrc_matches || 0,
             fuzzy_matches: migration.fuzzy_matches || 0,
           };
+          // Also merge cumulative stats into report for final display
+          if (report) {
+            report = {
+              ...report,
+              tracks_matched: migration.tracks_matched || 0,
+              tracks_not_matched: migration.tracks_not_matched || 0,
+              albums_matched: migration.tracks_matched || 0,
+              albums_not_matched: migration.tracks_not_matched || 0,
+              isrc_matches: migration.isrc_matches || 0,
+              upc_matches: migration.isrc_matches || 0,
+              fuzzy_matches: migration.fuzzy_matches || 0,
+            };
+          }
         }
       }
 
@@ -48,7 +62,7 @@ export async function GET(
         task_id: taskId,
         status: activeTask.status,
         progress,
-        report: activeTask.report,
+        report,
         error: activeTask.error,
       };
 
