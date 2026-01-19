@@ -4,7 +4,7 @@
  */
 
 import { NextRequest, after } from 'next/server';
-import { withSyncAuth, getBothClients, jsonError } from '@/lib/api-helpers';
+import { withSyncAuth, getBothClients, jsonError, handleBackgroundSyncError } from '@/lib/api-helpers';
 import { runSyncChunk } from '@/lib/services/chunk-sync';
 import { logger } from '@/lib/logger';
 
@@ -46,46 +46,32 @@ export async function POST(
     await storage.updateActiveTask(taskId, 'running');
     await storage.updateTask(taskId, 'running');
 
-    // Use Next.js after() to run sync after response is sent
-    // This ensures Vercel keeps the function alive until the background work completes
+    // Capture values before async callback
+    const offset = task.chunkState.offset;
+    const syncType = task.sync_type;
+    const dryRun = task.dry_run;
+    const migrationId = task.migration_id;
+
+    // Run sync in background after response is sent
     after(async () => {
       try {
         await runSyncChunk(
           userId,
           taskId,
-          task.sync_type,
-          task.dry_run,
-          task.chunkState!.offset, // Continue from where we left off
+          syncType,
+          dryRun,
+          offset,
           storage,
           clients.spotify,
           clients.qobuz,
-          task.migration_id
+          migrationId
         );
       } catch (err) {
-        logger.error('Background sync chunk continuation failed', {
-          error: err,
-          taskId,
-          userId,
-          syncType: task.sync_type,
-          offset: task.chunkState?.offset,
-          errorMessage: err instanceof Error ? err.message : String(err),
-          stack: err instanceof Error ? err.stack : undefined,
-        });
-        try {
-          await storage.updateActiveTask(taskId, 'failed', undefined, String(err));
-        } catch (updateErr) {
-          logger.error('Failed to record sync failure in database (task state may be inconsistent)', {
-            error: updateErr,
-            taskId,
-            originalError: err,
-            errorMessage: updateErr instanceof Error ? updateErr.message : String(updateErr),
-            stack: updateErr instanceof Error ? updateErr.stack : undefined,
-          });
-        }
+        await handleBackgroundSyncError(err, storage, taskId, userId, syncType, offset);
       }
     });
 
-    logger.info(`Continuing ${task.sync_type} sync chunk (task=${taskId}, offset=${task.chunkState.offset})`);
+    logger.info(`Continuing ${syncType} sync chunk (task=${taskId}, offset=${offset})`);
     return Response.json({ task_id: taskId, status: 'running' });
   });
 }

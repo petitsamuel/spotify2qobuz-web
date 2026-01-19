@@ -5,7 +5,7 @@
 
 import { NextRequest, after } from 'next/server';
 import { randomBytes } from 'crypto';
-import { withSyncAuth, getBothClients, jsonError } from '@/lib/api-helpers';
+import { withSyncAuth, getBothClients, jsonError, handleBackgroundSyncError } from '@/lib/api-helpers';
 import { runSyncChunk } from '@/lib/services/chunk-sync';
 import { logger } from '@/lib/logger';
 import type { SyncProgress } from '@/lib/types';
@@ -60,8 +60,7 @@ export async function POST(request: NextRequest) {
     // Store active task in database
     await storage.createActiveTask(userId, taskId, migrationId, syncType, dryRun, initialProgress as unknown as Record<string, unknown>);
 
-    // Use Next.js after() to run sync after response is sent
-    // This ensures Vercel keeps the function alive until the background work completes
+    // Run sync in background after response is sent
     after(async () => {
       try {
         await runSyncChunk(
@@ -69,32 +68,14 @@ export async function POST(request: NextRequest) {
           taskId,
           syncType,
           dryRun,
-          0, // Start from offset 0
+          0,
           storage,
           clients.spotify,
           clients.qobuz,
           migrationId
         );
       } catch (err) {
-        logger.error('Background sync task failed', {
-          error: err,
-          taskId,
-          userId,
-          syncType,
-          errorMessage: err instanceof Error ? err.message : String(err),
-          stack: err instanceof Error ? err.stack : undefined,
-        });
-        try {
-          await storage.updateActiveTask(taskId, 'failed', undefined, String(err));
-        } catch (updateErr) {
-          logger.error('Failed to record sync failure in database (task state may be inconsistent)', {
-            error: updateErr,
-            taskId,
-            originalError: err,
-            errorMessage: updateErr instanceof Error ? updateErr.message : String(updateErr),
-            stack: updateErr instanceof Error ? updateErr.stack : undefined,
-          });
-        }
+        await handleBackgroundSyncError(err, storage, taskId, userId, syncType, 0);
       }
     });
 
