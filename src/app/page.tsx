@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useCallback } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { ConnectionStatus } from '@/components/dashboard/connection-status';
 import { SyncControls } from '@/components/dashboard/sync-controls';
 import { SyncProgress } from '@/components/dashboard/sync-progress';
@@ -16,6 +16,7 @@ interface ActiveTask {
 }
 
 export default function DashboardPage() {
+  const queryClient = useQueryClient();
   const [manualActiveSync, setManualActiveSync] = useState<{ taskId: string; syncType: string } | null>(null);
 
   // Check for existing active sync on mount
@@ -44,7 +45,9 @@ export default function DashboardPage() {
 
   const handleSyncComplete = useCallback(() => {
     setManualActiveSync(null);
-  }, []);
+    // Refresh Qobuz stats to show updated counts after sync
+    queryClient.invalidateQueries({ queryKey: ['qobuzStats'] });
+  }, [queryClient]);
 
   return (
     <div className="space-y-6">
