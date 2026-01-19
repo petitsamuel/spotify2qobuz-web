@@ -3,7 +3,7 @@
  * Uses chunked sync to avoid Vercel timeout limits.
  */
 
-import { NextRequest } from 'next/server';
+import { NextRequest, after } from 'next/server';
 import { randomBytes } from 'crypto';
 import { withSyncAuth, getBothClients, jsonError } from '@/lib/api-helpers';
 import { runSyncChunk } from '@/lib/services/chunk-sync';
@@ -60,37 +60,41 @@ export async function POST(request: NextRequest) {
     // Store active task in database
     await storage.createActiveTask(userId, taskId, migrationId, syncType, dryRun, initialProgress as unknown as Record<string, unknown>);
 
-    // Start sync in background (fire and forget, but handle errors)
-    // Note: This runs AFTER the response is sent, so errors here don't affect the HTTP response
-    runSyncChunk(
-      userId,
-      taskId,
-      syncType,
-      dryRun,
-      0, // Start from offset 0
-      storage,
-      clients.spotify,
-      clients.qobuz,
-      migrationId
-    ).catch(async (err) => {
-      logger.error('Background sync task failed', {
-        error: err,
-        taskId,
-        userId,
-        syncType,
-        errorMessage: err instanceof Error ? err.message : String(err),
-        stack: err instanceof Error ? err.stack : undefined,
-      });
+    // Use Next.js after() to run sync after response is sent
+    // This ensures Vercel keeps the function alive until the background work completes
+    after(async () => {
       try {
-        await storage.updateActiveTask(taskId, 'failed', undefined, String(err));
-      } catch (updateErr) {
-        logger.error('Failed to record sync failure in database (task state may be inconsistent)', {
-          error: updateErr,
+        await runSyncChunk(
+          userId,
           taskId,
-          originalError: err,
-          errorMessage: updateErr instanceof Error ? updateErr.message : String(updateErr),
-          stack: updateErr instanceof Error ? updateErr.stack : undefined,
+          syncType,
+          dryRun,
+          0, // Start from offset 0
+          storage,
+          clients.spotify,
+          clients.qobuz,
+          migrationId
+        );
+      } catch (err) {
+        logger.error('Background sync task failed', {
+          error: err,
+          taskId,
+          userId,
+          syncType,
+          errorMessage: err instanceof Error ? err.message : String(err),
+          stack: err instanceof Error ? err.stack : undefined,
         });
+        try {
+          await storage.updateActiveTask(taskId, 'failed', undefined, String(err));
+        } catch (updateErr) {
+          logger.error('Failed to record sync failure in database (task state may be inconsistent)', {
+            error: updateErr,
+            taskId,
+            originalError: err,
+            errorMessage: updateErr instanceof Error ? updateErr.message : String(updateErr),
+            stack: updateErr instanceof Error ? updateErr.stack : undefined,
+          });
+        }
       }
     });
 
