@@ -7,6 +7,38 @@ import { Button } from '@/components/ui/button';
 import { Progress } from '@/components/ui/progress';
 import { Badge } from '@/components/ui/badge';
 
+// Spinning loader component
+function Loader({ className }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      xmlns="http://www.w3.org/2000/svg"
+      width="16"
+      height="16"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M21 12a9 9 0 1 1-6.219-8.56" />
+    </svg>
+  );
+}
+
+// Animated stat component that pulses when value changes
+function AnimatedStat({ label, value, prevValue }: { label: string; value: number; prevValue: number }) {
+  const changed = value !== prevValue;
+
+  return (
+    <div className={changed ? 'animate-count-pulse' : ''}>
+      <span className="text-muted-foreground">{label}: </span>
+      <span className={changed ? 'text-primary font-medium' : ''}>{value}</span>
+    </div>
+  );
+}
+
 interface SyncProgressData {
   current_playlist?: string;
   current_playlist_index?: number;
@@ -53,12 +85,15 @@ const POLLING_INTERVAL_MS = 1500;
 export function SyncProgress({ taskId, syncType, onComplete }: SyncProgressProps) {
   const [status, setStatus] = useState<string>('starting');
   const [progress, setProgress] = useState<SyncProgressData>({});
+  const [prevProgress, setPrevProgress] = useState<SyncProgressData>({});
   const [report, setReport] = useState<SyncReport | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [connectionError, setConnectionError] = useState<boolean>(false);
   const [chunkState, setChunkState] = useState<ChunkState | null>(null);
   const [isContinuing, setIsContinuing] = useState<boolean>(false);
   const retryCountRef = useRef(0);
+  const progressRef = useRef<SyncProgressData>({});
+  const seenTracksRef = useRef<Set<string>>(new Set());
   const maxRetries = 3;
 
   // Continue the sync when a chunk completes
@@ -108,7 +143,9 @@ export function SyncProgress({ taskId, syncType, onComplete }: SyncProgressProps
 
       setStatus(data.status);
       if (data.progress) {
+        setPrevProgress(progressRef.current);
         setProgress(data.progress);
+        progressRef.current = data.progress;
       }
       if (data.report) {
         setReport(data.report);
@@ -213,7 +250,11 @@ export function SyncProgress({ taskId, syncType, onComplete }: SyncProgressProps
               Syncing {syncType}
             </CardDescription>
           </div>
-          <Badge variant={isComplete ? 'default' : isFailed ? 'destructive' : 'secondary'}>
+          <Badge
+            variant={isComplete ? 'default' : isFailed ? 'destructive' : 'secondary'}
+            className={isActive ? 'animate-pulse-glow' : ''}
+          >
+            {isActive && <Loader className="mr-1.5 animate-spin-slow inline-block" />}
             {isChunkComplete ? 'continuing...' : status}
           </Badge>
         </div>
@@ -221,7 +262,11 @@ export function SyncProgress({ taskId, syncType, onComplete }: SyncProgressProps
       <CardContent className="space-y-4">
         {isActive && (
           <>
-            <Progress value={chunkState && chunkState.totalItems > 0 ? (chunkState.offset / chunkState.totalItems) * 100 : progress.percent_complete ?? 0} />
+            <Progress
+              value={chunkState && chunkState.totalItems > 0 ? (chunkState.offset / chunkState.totalItems) * 100 : progress.percent_complete ?? 0}
+              animated={true}
+              className="h-3"
+            />
             {chunkState && chunkState.totalItems > 0 && (
               <div className="text-xs text-muted-foreground">
                 Overall: {chunkState.offset} / {chunkState.totalItems} items
@@ -231,28 +276,32 @@ export function SyncProgress({ taskId, syncType, onComplete }: SyncProgressProps
               {progress.current_playlist && (
                 <div className="col-span-2">
                   <span className="text-muted-foreground">Current: </span>
-                  {progress.current_playlist}
+                  <span className="font-medium">{progress.current_playlist}</span>
                 </div>
               )}
-              <div>
+              <div className={(progress.current_track_index ?? 0) !== (prevProgress.current_track_index ?? 0) ? 'animate-count-pulse' : ''}>
                 <span className="text-muted-foreground">Tracks: </span>
-                {progress.current_track_index ?? 0} / {progress.total_tracks ?? 0}
+                <span className="font-medium tabular-nums">{progress.current_track_index ?? 0}</span>
+                <span className="text-muted-foreground"> / {progress.total_tracks ?? 0}</span>
               </div>
-              <div>
-                <span className="text-muted-foreground">Matched: </span>
-                {progress.tracks_matched ?? 0}
-              </div>
-              <div>
-                <span className="text-muted-foreground">Not matched: </span>
-                {progress.tracks_not_matched ?? 0}
-              </div>
-              <div>
-                <span className="text-muted-foreground">ISRC matches: </span>
-                {progress.isrc_matches ?? 0}
-              </div>
+              <AnimatedStat
+                label="Matched"
+                value={progress.tracks_matched ?? 0}
+                prevValue={prevProgress.tracks_matched ?? 0}
+              />
+              <AnimatedStat
+                label="Not matched"
+                value={progress.tracks_not_matched ?? 0}
+                prevValue={prevProgress.tracks_not_matched ?? 0}
+              />
+              <AnimatedStat
+                label="ISRC matches"
+                value={progress.isrc_matches ?? 0}
+                prevValue={prevProgress.isrc_matches ?? 0}
+              />
             </div>
             {progress.recent_missing && progress.recent_missing.length > 0 && (
-              <div className="rounded-md bg-muted p-3">
+              <div className="rounded-md bg-muted p-3 overflow-hidden">
                 <div className="mb-2 flex items-center justify-between">
                   <p className="text-sm font-medium">Recent missing tracks:</p>
                   <Link href="/review" className="text-xs text-primary hover:underline">
@@ -260,11 +309,20 @@ export function SyncProgress({ taskId, syncType, onComplete }: SyncProgressProps
                   </Link>
                 </div>
                 <ul className="space-y-1 text-xs text-muted-foreground">
-                  {progress.recent_missing.slice(-3).map((track, i) => (
-                    <li key={i}>
-                      {track.title} - {track.artist}
-                    </li>
-                  ))}
+                  {progress.recent_missing.slice(-3).map((track, i) => {
+                    const trackKey = `${track.title}-${track.artist}`;
+                    const isNew = !seenTracksRef.current.has(trackKey);
+                    if (isNew) seenTracksRef.current.add(trackKey);
+                    return (
+                      <li
+                        key={trackKey}
+                        className={isNew ? 'animate-slide-in' : ''}
+                        style={isNew ? { animationDelay: `${i * 100}ms` } : undefined}
+                      >
+                        {track.title} - {track.artist}
+                      </li>
+                    );
+                  })}
                 </ul>
               </div>
             )}
