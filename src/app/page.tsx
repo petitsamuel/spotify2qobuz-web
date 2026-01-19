@@ -47,8 +47,9 @@ export default function DashboardPage() {
     setManualActiveSync(null);
     // Clear the activeTask cache so stale data doesn't keep the modal open
     queryClient.setQueryData(['activeTask'], null);
-    // Refresh Qobuz stats to show updated counts after sync
+    // Refresh Qobuz stats and migrations list to show updated data after sync
     queryClient.invalidateQueries({ queryKey: ['qobuzStats'] });
+    queryClient.invalidateQueries({ queryKey: ['migrations'] });
   }, [queryClient]);
 
   return (
