@@ -356,6 +356,8 @@ export class AsyncSyncService {
               current_playlist: `${playlist.name} (skipped - unchanged)`,
               current_playlist_index: i + 1,
               playlists_skipped: report.playlists_skipped,
+              current_track_index: 0,
+              total_tracks: 0,
             });
             continue;
           }
