@@ -59,7 +59,9 @@ function normalizePlaylistName(name: string): string {
 function normalizeForComparison(str: string): string {
   return str
     .toLowerCase()
-    .replace(/[^\w\s]/g, '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '') // Remove diacritical marks
+    .replace(/[^\p{L}\p{N}\s]/gu, '') // Keep Unicode letters/numbers, remove punctuation
     .replace(/\s+/g, ' ')
     .trim();
 }
