@@ -17,6 +17,18 @@ interface QobuzStats {
   playlists: number;
 }
 
+interface SpotifyPlaylist {
+  id: string;
+  name: string;
+  tracks_count: number;
+}
+
+interface QobuzPlaylist {
+  id: string;
+  name: string;
+  tracks_count: number;
+}
+
 export function LibraryStats() {
   const spotifyQuery = useQuery<SpotifyStats | null>({
     queryKey: ['spotifyStats'],
@@ -38,6 +50,35 @@ export function LibraryStats() {
     },
   });
 
+  const spotifyPlaylistsQuery = useQuery<{ playlists: SpotifyPlaylist[] } | null>({
+    queryKey: ['spotifyPlaylists'],
+    queryFn: async () => {
+      const res = await fetch('/api/spotify/playlists');
+      if (!res.ok) return null;
+      return res.json();
+    },
+    enabled: !!spotifyQuery.data,
+  });
+
+  const qobuzPlaylistsQuery = useQuery<{ playlists: QobuzPlaylist[] } | null>({
+    queryKey: ['qobuzPlaylists'],
+    queryFn: async () => {
+      const res = await fetch('/api/qobuz/playlists');
+      if (!res.ok) return null;
+      return res.json();
+    },
+    enabled: !!qobuzQuery.data,
+  });
+
+  const spotifyTotalTracks = spotifyPlaylistsQuery.data?.playlists?.reduce(
+    (sum, p) => sum + (p.tracks_count || 0),
+    0
+  );
+  const qobuzTotalTracks = qobuzPlaylistsQuery.data?.playlists?.reduce(
+    (sum, p) => sum + (p.tracks_count || 0),
+    0
+  );
+
   if (!spotifyQuery.data && !qobuzQuery.data) {
     return null;
   }
@@ -47,7 +88,7 @@ export function LibraryStats() {
       <Card>
         <CardHeader className="pb-2">
           <CardTitle className="text-sm font-medium text-muted-foreground">
-            Tracks
+            Liked Tracks
           </CardTitle>
         </CardHeader>
         <CardContent>
@@ -95,10 +136,20 @@ export function LibraryStats() {
             <div>
               <p className="text-2xl font-bold">{spotifyQuery.data?.playlists ?? '-'}</p>
               <p className="text-xs text-muted-foreground">Spotify</p>
+              {spotifyTotalTracks !== undefined && (
+                <p className="text-xs text-muted-foreground mt-1">
+                  {spotifyTotalTracks.toLocaleString()} tracks
+                </p>
+              )}
             </div>
             <div className="text-right">
               <p className="text-2xl font-bold">{qobuzQuery.data?.playlists ?? '-'}</p>
               <p className="text-xs text-muted-foreground">Qobuz</p>
+              {qobuzTotalTracks !== undefined && (
+                <p className="text-xs text-muted-foreground mt-1">
+                  {qobuzTotalTracks.toLocaleString()} tracks
+                </p>
+              )}
             </div>
           </div>
         </CardContent>
