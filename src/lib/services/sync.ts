@@ -1290,7 +1290,6 @@ export class AsyncSyncService {
           partialReport.errors!.push(...playlistReport.errors);
 
           if (wasCancelled) {
-            partialReport.errors!.push('Cancelled by user');
             break;
           }
 
