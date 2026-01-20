@@ -29,6 +29,7 @@ export interface SpotifyPlaylist {
   name: string;
   tracks_count: number;
   image_url: string | null;
+  snapshot_id: string;
 }
 
 const SPOTIFY_API_BASE = 'https://api.spotify.com/v1';
@@ -133,6 +134,7 @@ export class SpotifyClient {
           name: string;
           tracks: { total: number };
           images?: Array<{ url: string; width?: number; height?: number }>;
+          snapshot_id: string;
         }>;
         next: string | null;
       }>(`/me/playlists?limit=${limit}&offset=${offset}`);
@@ -143,8 +145,9 @@ export class SpotifyClient {
           name: item.name,
           tracks_count: item.tracks.total,
           image_url: item.images?.[0]?.url || null,
+          snapshot_id: item.snapshot_id,
         });
-        logger.debug(`Found playlist: ${item.name} (${item.tracks.total} tracks)`);
+        logger.debug(`Found playlist: ${item.name} (${item.tracks.total} tracks, snapshot: ${item.snapshot_id})`);
       }
 
       if (!data.next) break;

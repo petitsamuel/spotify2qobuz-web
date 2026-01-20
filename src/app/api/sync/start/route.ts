@@ -16,6 +16,7 @@ export async function POST(request: NextRequest) {
     const formData = await request.formData();
     const syncType = formData.get('type') as string;
     const dryRun = formData.get('dry_run') === 'true';
+    const skipUnchangedPlaylists = formData.get('skip_unchanged') === 'true';
 
     if (!['playlists', 'favorites', 'albums'].includes(syncType)) {
       return jsonError('Invalid sync type', 400);
@@ -47,6 +48,7 @@ export async function POST(request: NextRequest) {
       current_playlist: '',
       current_playlist_index: 0,
       total_playlists: 0,
+      playlists_skipped: 0,
       current_track_index: 0,
       total_tracks: 0,
       tracks_matched: 0,
@@ -73,7 +75,8 @@ export async function POST(request: NextRequest) {
           storage,
           clients.spotify,
           clients.qobuz,
-          migrationId
+          migrationId,
+          { skipUnchangedPlaylists }
         );
       } catch (err) {
         logger.error('Background sync task failed', {
