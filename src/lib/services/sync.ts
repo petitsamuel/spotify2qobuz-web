@@ -414,13 +414,16 @@ export class AsyncSyncService {
       } else {
         report.tracks_not_matched++;
         this.progress.update({ tracks_not_matched: report.tracks_not_matched });
-        report.missing_tracks.push({
+        const missingTrack: MissingTrack = {
           spotify_id: track.id,
           title: track.title,
           artist: track.artist,
           album: track.album,
           suggestions: [],
-        });
+        };
+        report.missing_tracks.push(missingTrack);
+        this.progress.addMissingTrack(missingTrack);
+        this.progress.update({});
       }
     }
 

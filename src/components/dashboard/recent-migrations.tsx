@@ -6,7 +6,7 @@ import { Badge } from '@/components/ui/badge';
 
 interface Migration {
   id: number;
-  sync_type: string;
+  migration_type: string;
   status: string;
   dry_run: boolean;
   tracks_matched: number;
@@ -84,7 +84,7 @@ export function RecentMigrations() {
               <div className="text-right">
                 <div className="flex items-center justify-end gap-1">
                   <Badge variant="outline" className="text-xs capitalize">
-                    {migration.sync_type}
+                    {migration.migration_type}
                   </Badge>
                   <Badge
                     variant={
