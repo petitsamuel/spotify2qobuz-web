@@ -29,6 +29,7 @@ interface SpotifyTrack {
   id: string;
   title: string;
   artist: string;
+  allArtists: string[];
   album: string;
   isrc: string | null;
 }
@@ -189,8 +190,16 @@ export default function PlaylistsPage() {
             {matchedPlaylists.map((matched) => (
               <Card
                 key={matched.spotifyPlaylist.id}
-                className="overflow-hidden cursor-pointer hover:border-primary transition-colors"
+                className="overflow-hidden cursor-pointer hover:border-primary focus-visible:border-primary focus-visible:ring-2 focus-visible:ring-ring transition-colors"
                 onClick={() => handlePlaylistClick(matched)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    handlePlaylistClick(matched);
+                  }
+                }}
+                role="button"
+                tabIndex={0}
               >
                 {matched.spotifyPlaylist.image_url && (
                   <div className="aspect-square bg-muted">
@@ -210,7 +219,7 @@ export default function PlaylistsPage() {
                     {matched.qobuzPlaylist ? (
                       matched.trackDiff === 0 ? (
                         <Badge variant="secondary" className="bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200">
-                          Synced
+                          Same count
                         </Badge>
                       ) : (
                         <Badge variant="outline" className="text-orange-600 border-orange-300">
@@ -219,7 +228,7 @@ export default function PlaylistsPage() {
                       )
                     ) : (
                       <Badge variant="outline" className="text-muted-foreground">
-                        Not synced
+                        Not in Qobuz
                       </Badge>
                     )}
                   </div>
