@@ -1244,6 +1244,11 @@ export class AsyncSyncService {
     const spotifyTitleVariants = getAlbumTitleVariants(spotifyAlbum.title)
       .map(t => t.toLowerCase());
 
+    // Minimum title score to include a suggestion - prevents showing completely
+    // unrelated albums by the same artist (e.g., "Macadelic" suggesting "Circles")
+    const MIN_TITLE_SCORE_FOR_ALBUM_SUGGESTION = 50;
+    const MIN_ARTIST_SCORE_FOR_ALBUM_SUGGESTION = 60;
+
     const suggestions: Suggestion[] = [];
 
     for (const candidate of candidates) {
@@ -1264,6 +1269,17 @@ export class AsyncSyncService {
 
       const artistScore = bestFuzzyScore(spotifyArtist, candidateArtist);
 
+      // Filter out suggestions with low title match - we don't want to suggest
+      // completely different albums just because the artist matches
+      if (titleScore < MIN_TITLE_SCORE_FOR_ALBUM_SUGGESTION ||
+          artistScore < MIN_ARTIST_SCORE_FOR_ALBUM_SUGGESTION) {
+        continue;
+      }
+
+      // Weight title more heavily (70-30) for album suggestions since users
+      // are looking for specific albums, not just any album by the artist
+      const combinedScore = Math.round(titleScore * 0.7 + artistScore * 0.3);
+
       suggestions.push({
         qobuz_id: parseInt(candidate.id),
         title: candidate.title,
@@ -1271,11 +1287,12 @@ export class AsyncSyncService {
         album: candidate.title,
         title_score: titleScore,
         artist_score: artistScore,
-        score: Math.round((titleScore + artistScore) / 2),
+        score: combinedScore,
         duration_diff_sec: 0,
       });
     }
 
+    // Sort by combined score (which now prioritizes title match)
     suggestions.sort((a, b) => b.score - a.score);
     return suggestions.slice(0, 5);
   }
