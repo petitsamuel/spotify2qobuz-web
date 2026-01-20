@@ -60,6 +60,9 @@ export interface SyncProgress {
   fuzzy_matches: number;
   percent_complete: number;
   recent_missing: MissingTrack[];
+  // Rate limiter visibility
+  rate_limit_delay_ms?: number;
+  rate_limit_count?: number;
 }
 
 // === Report Types ===

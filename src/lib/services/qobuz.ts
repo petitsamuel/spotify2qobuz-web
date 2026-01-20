@@ -119,6 +119,13 @@ export class QobuzClient {
   }
 
   /**
+   * Get current rate limiter statistics for monitoring.
+   */
+  getRateLimiterStats(): { currentDelay: number; rateLimitedCount: number } {
+    return this.rateLimiter.getStats();
+  }
+
+  /**
    * Validate the session token by fetching user favorites.
    */
   async authenticate(): Promise<void> {

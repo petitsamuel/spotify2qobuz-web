@@ -130,7 +130,7 @@ export async function runSyncChunk(
         }
       }
     } else {
-      // Playlists use full sync (no chunking yet)
+      // Playlists now use chunking (10 playlists per chunk)
       // Build playlist sync options if skipUnchangedPlaylists is enabled
       let playlistSyncOptions: PlaylistSyncOptions | undefined;
       if (options?.skipUnchangedPlaylists) {
@@ -145,35 +145,25 @@ export async function runSyncChunk(
         logger.info(`Skip unchanged playlists enabled. Found ${syncedPlaylistsMap.size} previously synced playlists.`);
       }
 
-      const report = await syncService.syncPlaylists(undefined, dryRun, playlistSyncOptions);
-      for (const track of report.missing_tracks) {
-        await storage.saveUnmatchedTrack(
-          userId,
-          track.spotify_id,
-          track.title,
-          track.artist,
-          track.album,
-          syncType,
-          track.suggestions as unknown as Array<Record<string, unknown>>
-        );
+      // Use smaller chunk size for playlists (10) since each playlist can have many tracks
+      const PLAYLIST_CHUNK_SIZE = 10;
+      chunkResult = await syncService.syncPlaylistsChunk(offset, PLAYLIST_CHUNK_SIZE, dryRun, playlistSyncOptions);
+
+      // Save unmatched tracks from this chunk
+      const partialReport = chunkResult.partialReport;
+      if ('missing_tracks' in partialReport && partialReport.missing_tracks) {
+        for (const track of partialReport.missing_tracks) {
+          await storage.saveUnmatchedTrack(
+            userId,
+            track.spotify_id,
+            track.title,
+            track.artist,
+            track.album,
+            syncType,
+            track.suggestions as unknown as Array<Record<string, unknown>>
+          );
+        }
       }
-
-      // Update migration with cumulative stats
-      await storage.updateMigration(migrationId, {
-        completed_at: new Date().toISOString(),
-        status: 'completed',
-        tracks_matched: cumulativeStats.tracks_matched + report.tracks_matched,
-        tracks_not_matched: cumulativeStats.tracks_not_matched + report.tracks_not_matched,
-        isrc_matches: cumulativeStats.isrc_matches + report.isrc_matches,
-        fuzzy_matches: cumulativeStats.fuzzy_matches + report.fuzzy_matches,
-        report_json: JSON.stringify(report),
-      });
-
-      await storage.updateActiveTask(taskId, 'completed', undefined, undefined, report as unknown as Record<string, unknown>);
-      await storage.updateTask(taskId, 'completed');
-
-      logger.info(`Playlist sync completed: ${taskId} (skipped: ${report.playlists_skipped ?? 0})`);
-      return;
     }
 
     // Calculate cumulative stats for this chunk
