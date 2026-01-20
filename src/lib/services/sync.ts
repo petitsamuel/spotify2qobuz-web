@@ -373,7 +373,7 @@ export class AsyncSyncService {
 
           // Mark playlist as synced after successful sync
           if (!dryRun && options?.onPlaylistSynced) {
-            options.onPlaylistSynced(playlist.id, playlist.snapshot_id, playlist.tracks_count);
+            await options.onPlaylistSynced(playlist.id, playlist.snapshot_id, playlist.tracks_count);
           }
         } catch (error) {
           logger.error(`Error syncing playlist ${playlist.name}: ${error}`);
