@@ -22,12 +22,16 @@ interface SyncControlsProps {
 
 export function SyncControls({ onSyncStarted, disabled }: SyncControlsProps) {
   const [dryRun, setDryRun] = useState(false);
+  const [skipUnchanged, setSkipUnchanged] = useState(true);
 
   const startSync = useMutation<StartSyncResult, Error, string>({
     mutationFn: async (syncType) => {
       const formData = new FormData();
       formData.append('type', syncType);
       formData.append('dry_run', String(dryRun));
+      if (syncType === 'playlists') {
+        formData.append('skip_unchanged', String(skipUnchanged));
+      }
 
       const res = await fetch('/api/sync/start', {
         method: 'POST',
@@ -114,6 +118,18 @@ export function SyncControls({ onSyncStarted, disabled }: SyncControlsProps) {
             <p className="text-sm text-muted-foreground">
               Recreate your Spotify playlists in Qobuz.
             </p>
+            <div className="flex items-center space-x-2">
+              <input
+                type="checkbox"
+                id="skip-unchanged"
+                checked={skipUnchanged}
+                onChange={(e) => setSkipUnchanged(e.target.checked)}
+                className="h-4 w-4"
+              />
+              <Label htmlFor="skip-unchanged" className="text-sm">
+                Skip unchanged playlists (faster re-sync)
+              </Label>
+            </div>
             <Button
               onClick={() => handleSync('playlists')}
               disabled={disabled || startSync.isPending}

@@ -64,6 +64,15 @@ export interface OAuthState {
   expires_at: Date;
 }
 
+export interface SyncedPlaylist {
+  id: number;
+  user_id: string;
+  playlist_id: string;
+  snapshot_id: string;
+  track_count: number;
+  synced_at: string;
+}
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type SqlFunction = ReturnType<typeof neon>;
 
@@ -217,6 +226,19 @@ export class Storage {
           chunk_state_json TEXT,
           created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
           updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      `;
+
+      // Synced playlists table - tracks which playlists have been synced and their snapshot
+      await this.sql`
+        CREATE TABLE IF NOT EXISTS synced_playlists (
+          id SERIAL PRIMARY KEY,
+          user_id TEXT NOT NULL,
+          playlist_id TEXT NOT NULL,
+          snapshot_id TEXT NOT NULL,
+          track_count INTEGER DEFAULT 0,
+          synced_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          UNIQUE(user_id, playlist_id)
         )
       `;
 
@@ -507,12 +529,13 @@ export class Storage {
       await this.sql`CREATE INDEX IF NOT EXISTS idx_oauth_state_expires ON oauth_state(expires_at)`;
       await this.sql`CREATE INDEX IF NOT EXISTS idx_active_tasks_user ON active_tasks(user_id)`;
       await this.sql`CREATE INDEX IF NOT EXISTS idx_active_tasks_status ON active_tasks(status)`;
+      await this.sql`CREATE INDEX IF NOT EXISTS idx_synced_playlists_user ON synced_playlists(user_id)`;
 
       logger.info('Database initialized successfully', {
         tables_checked: ['credentials', 'migrations', 'sync_tasks', 'synced_tracks',
-                        'sync_progress', 'unmatched_tracks', 'oauth_state', 'active_tasks'],
-        indexes_ensured: 12,
-        schema_version: 'v4_with_user_id_migration'
+                        'sync_progress', 'unmatched_tracks', 'oauth_state', 'active_tasks', 'synced_playlists'],
+        indexes_ensured: 13,
+        schema_version: 'v5_with_synced_playlists'
       });
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
@@ -1002,6 +1025,79 @@ export class Storage {
     } else {
       await this.sql`DELETE FROM unmatched_tracks WHERE user_id = ${userId}`;
     }
+  }
+
+  // --- Synced Playlists ---
+
+  /**
+   * Get a synced playlist record by playlist ID.
+   * Returns null if the playlist hasn't been synced before.
+   */
+  async getSyncedPlaylist(userId: string, playlistId: string): Promise<SyncedPlaylist | null> {
+    const result = await this.sql`
+      SELECT * FROM synced_playlists
+      WHERE user_id = ${userId} AND playlist_id = ${playlistId}
+    `;
+    const rows = this.toRows(result);
+    if (rows.length === 0) return null;
+
+    const row = rows[0];
+    return {
+      id: Number(row.id),
+      user_id: String(row.user_id),
+      playlist_id: String(row.playlist_id),
+      snapshot_id: String(row.snapshot_id),
+      track_count: Number(row.track_count),
+      synced_at: String(row.synced_at),
+    };
+  }
+
+  /**
+   * Get all synced playlists for a user as a Map of playlist_id -> snapshot_id.
+   * Useful for quickly checking which playlists need re-syncing.
+   */
+  async getSyncedPlaylistsMap(userId: string): Promise<Map<string, { snapshot_id: string; track_count: number }>> {
+    const result = await this.sql`
+      SELECT playlist_id, snapshot_id, track_count FROM synced_playlists
+      WHERE user_id = ${userId}
+    `;
+    const rows = this.toRows(result);
+    const map = new Map<string, { snapshot_id: string; track_count: number }>();
+
+    for (const row of rows) {
+      map.set(String(row.playlist_id), {
+        snapshot_id: String(row.snapshot_id),
+        track_count: Number(row.track_count),
+      });
+    }
+
+    return map;
+  }
+
+  /**
+   * Mark a playlist as synced with its current snapshot_id.
+   * Updates the record if the playlist was previously synced.
+   */
+  async markPlaylistSynced(
+    userId: string,
+    playlistId: string,
+    snapshotId: string,
+    trackCount: number
+  ): Promise<void> {
+    await this.sql`
+      INSERT INTO synced_playlists (user_id, playlist_id, snapshot_id, track_count, synced_at)
+      VALUES (${userId}, ${playlistId}, ${snapshotId}, ${trackCount}, NOW())
+      ON CONFLICT (user_id, playlist_id)
+      DO UPDATE SET snapshot_id = ${snapshotId}, track_count = ${trackCount}, synced_at = NOW()
+    `;
+  }
+
+  /**
+   * Clear synced playlist records for a user.
+   * Useful when user wants to force a full re-sync.
+   */
+  async clearSyncedPlaylists(userId: string): Promise<void> {
+    await this.sql`DELETE FROM synced_playlists WHERE user_id = ${userId}`;
   }
 
   // --- Helper Methods ---

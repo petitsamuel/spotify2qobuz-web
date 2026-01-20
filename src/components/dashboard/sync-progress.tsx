@@ -43,6 +43,7 @@ interface SyncProgressData {
   current_playlist?: string;
   current_playlist_index?: number;
   total_playlists?: number;
+  playlists_skipped?: number;
   current_track_index?: number;
   total_tracks?: number;
   tracks_matched?: number;
@@ -61,6 +62,7 @@ interface SyncReport {
   tracks_not_matched?: number;
   albums_matched?: number;
   albums_not_matched?: number;
+  playlists_skipped?: number;
   isrc_matches?: number;
   upc_matches?: number;
   fuzzy_matches?: number;
@@ -274,7 +276,12 @@ export function SyncProgress({ taskId, syncType, onComplete }: SyncProgressProps
             )}
             {syncType === 'playlists' && progress.total_playlists && progress.total_playlists > 0 && (
               <div className="text-sm font-medium">
-                Playlist {(progress.current_playlist_index ?? 0) + 1} / {progress.total_playlists}
+                Playlist {progress.current_playlist_index ?? 0} / {progress.total_playlists}
+                {(progress.playlists_skipped ?? 0) > 0 && (
+                  <span className="text-muted-foreground ml-2">
+                    ({progress.playlists_skipped} skipped)
+                  </span>
+                )}
               </div>
             )}
             {syncType === 'albums' && chunkState && chunkState.totalItems > 0 && (
@@ -361,6 +368,12 @@ export function SyncProgress({ taskId, syncType, onComplete }: SyncProgressProps
                 <span className="text-muted-foreground">Fuzzy matches: </span>
                 {report.fuzzy_matches ?? 0}
               </div>
+              {(report.playlists_skipped ?? 0) > 0 && (
+                <div className="col-span-2">
+                  <span className="text-muted-foreground">Playlists skipped (unchanged): </span>
+                  {report.playlists_skipped}
+                </div>
+              )}
             </div>
             <div className="flex gap-2">
               <Button onClick={onComplete}>Done</Button>

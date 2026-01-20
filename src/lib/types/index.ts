@@ -51,6 +51,7 @@ export interface SyncProgress {
   current_playlist: string;
   current_playlist_index: number;
   total_playlists: number;
+  playlists_skipped: number;
   current_track_index: number;
   total_tracks: number;
   tracks_matched: number;
@@ -70,6 +71,7 @@ export interface SyncReport {
   tracks_not_matched: number;
   tracks_skipped: number;
   tracks_already_in_qobuz: number;
+  playlists_skipped: number;
   isrc_matches: number;
   fuzzy_matches: number;
   missing_tracks: MissingTrack[];

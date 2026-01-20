@@ -3,7 +3,7 @@
  * Extracts common logic from start and continue routes.
  */
 
-import { AsyncSyncService } from './sync';
+import { AsyncSyncService, PlaylistSyncOptions } from './sync';
 import { Storage } from '../db/storage';
 import { SpotifyClient } from './spotify';
 import { QobuzClient } from './qobuz';
@@ -57,7 +57,8 @@ export async function runSyncChunk(
   storage: Storage,
   spotifyClient: SpotifyClient,
   qobuzClient: QobuzClient,
-  migrationId: number
+  migrationId: number,
+  options?: { skipUnchangedPlaylists?: boolean }
 ): Promise<void> {
   const alreadySynced = await storage.getSyncedTrackIds(userId, syncType);
 
@@ -130,7 +131,21 @@ export async function runSyncChunk(
       }
     } else {
       // Playlists use full sync (no chunking yet)
-      const report = await syncService.syncPlaylists(undefined, dryRun);
+      // Build playlist sync options if skipUnchangedPlaylists is enabled
+      let playlistSyncOptions: PlaylistSyncOptions | undefined;
+      if (options?.skipUnchangedPlaylists) {
+        const syncedPlaylistsMap = await storage.getSyncedPlaylistsMap(userId);
+        playlistSyncOptions = {
+          skipUnchanged: true,
+          syncedPlaylistsMap,
+          onPlaylistSynced: async (playlistId, snapshotId, trackCount) => {
+            await storage.markPlaylistSynced(userId, playlistId, snapshotId, trackCount);
+          },
+        };
+        logger.info(`Skip unchanged playlists enabled. Found ${syncedPlaylistsMap.size} previously synced playlists.`);
+      }
+
+      const report = await syncService.syncPlaylists(undefined, dryRun, playlistSyncOptions);
       for (const track of report.missing_tracks) {
         await storage.saveUnmatchedTrack(
           userId,
@@ -157,7 +172,7 @@ export async function runSyncChunk(
       await storage.updateActiveTask(taskId, 'completed', undefined, undefined, report as unknown as Record<string, unknown>);
       await storage.updateTask(taskId, 'completed');
 
-      logger.info(`Playlist sync completed: ${taskId}`);
+      logger.info(`Playlist sync completed: ${taskId} (skipped: ${report.playlists_skipped ?? 0})`);
       return;
     }
 

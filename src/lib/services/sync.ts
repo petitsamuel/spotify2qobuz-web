@@ -171,6 +171,13 @@ function getAlbumTitleVariants(title: string): string[] {
 type ProgressCallback = (progress: SyncProgress) => void;
 type TrackSyncedCallback = (spotifyId: string, qobuzId: string) => void;
 type CancellationChecker = () => Promise<boolean>;
+type PlaylistSyncedCallback = (playlistId: string, snapshotId: string, trackCount: number) => void;
+
+export interface PlaylistSyncOptions {
+  skipUnchanged: boolean;
+  syncedPlaylistsMap: Map<string, { snapshot_id: string; track_count: number }>;
+  onPlaylistSynced?: PlaylistSyncedCallback;
+}
 
 // Batch sizes
 const FAVORITE_BATCH_SIZE = 25;
@@ -179,6 +186,7 @@ export class ProgressTracker {
   current_playlist = '';
   current_playlist_index = 0;
   total_playlists = 0;
+  playlists_skipped = 0;
   current_track_index = 0;
   total_tracks = 0;
   tracks_matched = 0;
@@ -215,6 +223,7 @@ export class ProgressTracker {
       current_playlist: this.current_playlist,
       current_playlist_index: this.current_playlist_index,
       total_playlists: this.total_playlists,
+      playlists_skipped: this.playlists_skipped,
       current_track_index: this.current_track_index,
       total_tracks: this.total_tracks,
       tracks_matched: this.tracks_matched,
@@ -307,7 +316,8 @@ export class AsyncSyncService {
    */
   async syncPlaylists(
     playlistIds?: string[],
-    dryRun: boolean = false
+    dryRun: boolean = false,
+    options?: PlaylistSyncOptions
   ): Promise<SyncReport> {
     const report: SyncReport = {
       started_at: new Date().toISOString(),
@@ -316,6 +326,7 @@ export class AsyncSyncService {
       tracks_not_matched: 0,
       tracks_skipped: 0,
       tracks_already_in_qobuz: 0,
+      playlists_skipped: 0,
       isrc_matches: 0,
       fuzzy_matches: 0,
       missing_tracks: [],
@@ -334,6 +345,24 @@ export class AsyncSyncService {
 
       for (let i = 0; i < playlists.length; i++) {
         const playlist = playlists[i];
+
+        // Check if we should skip this playlist (unchanged snapshot_id)
+        if (options?.skipUnchanged) {
+          const syncedPlaylist = options.syncedPlaylistsMap.get(playlist.id);
+          if (syncedPlaylist && syncedPlaylist.snapshot_id === playlist.snapshot_id) {
+            logger.info(`Skipping unchanged playlist: ${playlist.name} (snapshot: ${playlist.snapshot_id})`);
+            report.playlists_skipped++;
+            this.progress.update({
+              current_playlist: `${playlist.name} (skipped - unchanged)`,
+              current_playlist_index: i + 1,
+              playlists_skipped: report.playlists_skipped,
+              current_track_index: 0,
+              total_tracks: 0,
+            });
+            continue;
+          }
+        }
+
         this.progress.update({
           current_playlist: playlist.name,
           current_playlist_index: i + 1,
@@ -343,6 +372,11 @@ export class AsyncSyncService {
 
         try {
           await this.syncSinglePlaylist(playlist, report, dryRun);
+
+          // Mark playlist as synced after successful sync
+          if (!dryRun && options?.onPlaylistSynced) {
+            await options.onPlaylistSynced(playlist.id, playlist.snapshot_id, playlist.tracks_count);
+          }
         } catch (error) {
           logger.error(`Error syncing playlist ${playlist.name}: ${error}`);
           report.errors.push(`Playlist ${playlist.name}: ${String(error)}`);
@@ -455,6 +489,7 @@ export class AsyncSyncService {
       tracks_not_matched: 0,
       tracks_skipped: 0,
       tracks_already_in_qobuz: 0,
+      playlists_skipped: 0,
       isrc_matches: 0,
       fuzzy_matches: 0,
       missing_tracks: [],
@@ -1302,4 +1337,4 @@ export class AsyncSyncService {
 }
 
 // Re-export types
-export type { SyncProgress, SyncReport, AlbumSyncReport, MissingTrack, ProgressCallback, TrackSyncedCallback };
+export type { SyncProgress, SyncReport, AlbumSyncReport, MissingTrack, ProgressCallback, TrackSyncedCallback, PlaylistSyncedCallback };
