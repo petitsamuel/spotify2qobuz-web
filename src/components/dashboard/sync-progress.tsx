@@ -55,6 +55,9 @@ interface SyncProgressData {
     title: string;
     artist: string;
   }>;
+  // Rate limiter visibility
+  rate_limit_delay_ms?: number;
+  rate_limit_count?: number;
 }
 
 interface SyncReport {
@@ -317,6 +320,16 @@ export function SyncProgress({ taskId, syncType, onComplete }: SyncProgressProps
                 prevValue={prevProgress.isrc_matches ?? 0}
               />
             </div>
+            {/* Show rate limiter warning when throttled */}
+            {(progress.rate_limit_delay_ms ?? 0) > 500 && (
+              <div className="rounded-md bg-yellow-500/10 p-2 text-xs text-yellow-700 dark:text-yellow-400">
+                <span className="font-medium">API throttled:</span>{' '}
+                {Math.round((progress.rate_limit_delay_ms ?? 0) / 1000 * 10) / 10}s delay
+                {(progress.rate_limit_count ?? 0) > 0 && (
+                  <span className="ml-2">({progress.rate_limit_count} rate limits hit)</span>
+                )}
+              </div>
+            )}
             {progress.recent_missing && progress.recent_missing.length > 0 && (
               <div className="rounded-md bg-muted p-3 overflow-hidden">
                 <div className="mb-2 flex items-center justify-between">

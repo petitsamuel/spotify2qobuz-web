@@ -194,11 +194,19 @@ export class ProgressTracker {
   isrc_matches = 0;
   fuzzy_matches = 0;
   recent_missing: MissingTrack[] = [];
+  rate_limit_delay_ms = 0;
+  rate_limit_count = 0;
   private maxRecentMissing = 20;
   private callback?: ProgressCallback;
+  private getRateLimiterStats?: () => { currentDelay: number; rateLimitedCount: number };
 
-  constructor(callback?: ProgressCallback, initialRecentMissing?: MissingTrack[]) {
+  constructor(
+    callback?: ProgressCallback,
+    initialRecentMissing?: MissingTrack[],
+    getRateLimiterStats?: () => { currentDelay: number; rateLimitedCount: number }
+  ) {
     this.callback = callback;
+    this.getRateLimiterStats = getRateLimiterStats;
     if (initialRecentMissing) {
       this.recent_missing = initialRecentMissing.slice(-this.maxRecentMissing);
     }
@@ -219,6 +227,13 @@ export class ProgressTracker {
   }
 
   toDict(): SyncProgress {
+    // Update rate limiter stats if available
+    if (this.getRateLimiterStats) {
+      const stats = this.getRateLimiterStats();
+      this.rate_limit_delay_ms = stats.currentDelay;
+      this.rate_limit_count = stats.rateLimitedCount;
+    }
+
     return {
       current_playlist: this.current_playlist,
       current_playlist_index: this.current_playlist_index,
@@ -232,6 +247,8 @@ export class ProgressTracker {
       fuzzy_matches: this.fuzzy_matches,
       percent_complete: this.calculatePercent(),
       recent_missing: this.recent_missing,
+      rate_limit_delay_ms: this.rate_limit_delay_ms,
+      rate_limit_count: this.rate_limit_count,
     };
   }
 
@@ -280,7 +297,11 @@ export class AsyncSyncService {
     this.spotifyClient = spotifyClient;
     this.qobuzClient = qobuzClient;
     this.matcher = new TrackMatcher(qobuzClient);
-    this.progress = new ProgressTracker(progressCallback, initialRecentMissing);
+    this.progress = new ProgressTracker(
+      progressCallback,
+      initialRecentMissing,
+      () => qobuzClient.getRateLimiterStats()
+    );
     this.checkCancelled = cancellationChecker;
   }
 
@@ -344,6 +365,13 @@ export class AsyncSyncService {
       this.progress.update({ total_playlists: playlists.length });
 
       for (let i = 0; i < playlists.length; i++) {
+        // Check for cancellation between playlists
+        if (await this.isCancelled()) {
+          logger.info('Playlist sync cancelled by user');
+          report.errors.push('Cancelled by user');
+          break;
+        }
+
         const playlist = playlists[i];
 
         // Check if we should skip this playlist (unchanged snapshot_id)
@@ -371,7 +399,11 @@ export class AsyncSyncService {
         });
 
         try {
-          await this.syncSinglePlaylist(playlist, report, dryRun);
+          const wasCancelled = await this.syncSinglePlaylist(playlist, report, dryRun);
+          if (wasCancelled) {
+            report.errors.push('Cancelled by user');
+            break;
+          }
 
           // Mark playlist as synced after successful sync
           if (!dryRun && options?.onPlaylistSynced) {
@@ -394,13 +426,16 @@ export class AsyncSyncService {
     return report;
   }
 
+  /**
+   * Sync a single playlist. Returns true if cancelled, false otherwise.
+   */
   private async syncSinglePlaylist(
     playlist: { id: string; name: string },
     report: SyncReport,
     dryRun: boolean
-  ): Promise<void> {
+  ): Promise<boolean> {
     const spotifyTracks = await this.spotifyClient.listTracks(playlist.id);
-    if (spotifyTracks.length === 0) return;
+    if (spotifyTracks.length === 0) return false;
 
     const qobuzPlaylistName = `${playlist.name} (from Spotify)`;
     let qobuzPlaylistId: string | null = null;
@@ -423,6 +458,12 @@ export class AsyncSyncService {
     const tracksToAdd: number[] = [];
 
     for (let i = 0; i < spotifyTracks.length; i++) {
+      // Check for cancellation during track processing
+      if (await this.isCancelled()) {
+        logger.info(`Playlist sync cancelled during ${playlist.name}`);
+        return true;
+      }
+
       const track = spotifyTracks[i];
       this.progress.update({ current_track_index: i + 1 });
 
@@ -464,6 +505,12 @@ export class AsyncSyncService {
     // Add tracks to playlist
     if (!dryRun && qobuzPlaylistId) {
       for (const trackId of tracksToAdd) {
+        // Check for cancellation during track addition
+        if (await this.isCancelled()) {
+          logger.info(`Playlist sync cancelled during track addition for ${playlist.name}`);
+          return true;
+        }
+
         try {
           await this.qobuzClient.addTrack(qobuzPlaylistId, trackId);
         } catch (error) {
@@ -472,6 +519,8 @@ export class AsyncSyncService {
         }
       }
     }
+
+    return false;
   }
 
   /**
@@ -1123,6 +1172,149 @@ export class AsyncSyncService {
 
     const hasMore = nextOffset < totalItems;
     logger.info(`Album chunk complete: processed ${processedInChunk}, nextOffset=${nextOffset}, total=${totalItems}, hasMore=${hasMore}`);
+
+    return {
+      hasMore,
+      nextOffset,
+      totalItems,
+      processedInChunk,
+      partialReport,
+    };
+  }
+
+  /**
+   * Sync a chunk of playlists from Spotify to Qobuz.
+   * Processes up to chunkSize playlists starting from the given offset.
+   * Returns a ChunkResult indicating if there are more playlists to process.
+   */
+  async syncPlaylistsChunk(
+    offset: number,
+    chunkSize: number = 10,
+    dryRun: boolean = false,
+    options?: PlaylistSyncOptions
+  ): Promise<ChunkResult> {
+    const partialReport: Partial<SyncReport> = {
+      started_at: new Date().toISOString(),
+      completed_at: null,
+      tracks_matched: 0,
+      tracks_not_matched: 0,
+      tracks_skipped: 0,
+      tracks_already_in_qobuz: 0,
+      playlists_skipped: 0,
+      isrc_matches: 0,
+      fuzzy_matches: 0,
+      missing_tracks: [],
+      synced_tracks: [],
+      errors: [],
+    };
+
+    let processedInChunk = 0;
+    let totalItems = 0;
+    let nextOffset = offset;
+
+    try {
+      // Get all playlists to determine total and slice for this chunk
+      const allPlaylists = await this.spotifyClient.listPlaylists();
+      totalItems = allPlaylists.length;
+
+      // Slice playlists for this chunk
+      const playlistsToProcess = allPlaylists.slice(offset, offset + chunkSize);
+
+      logger.info(`Processing playlist chunk: offset=${offset}, chunkSize=${chunkSize}, total=${totalItems}`);
+
+      this.progress.update({ total_playlists: totalItems });
+
+      for (let i = 0; i < playlistsToProcess.length; i++) {
+        // Check for cancellation between playlists
+        if (await this.isCancelled()) {
+          logger.info('Playlist chunk sync cancelled by user');
+          partialReport.errors!.push('Cancelled by user');
+          break;
+        }
+
+        const playlist = playlistsToProcess[i];
+        const globalIndex = offset + i;
+
+        // Check if we should skip this playlist (unchanged snapshot_id)
+        if (options?.skipUnchanged) {
+          const syncedPlaylist = options.syncedPlaylistsMap.get(playlist.id);
+          if (syncedPlaylist && syncedPlaylist.snapshot_id === playlist.snapshot_id) {
+            logger.info(`Skipping unchanged playlist: ${playlist.name} (snapshot: ${playlist.snapshot_id})`);
+            partialReport.playlists_skipped!++;
+            this.progress.update({
+              current_playlist: `${playlist.name} (skipped - unchanged)`,
+              current_playlist_index: globalIndex + 1,
+              playlists_skipped: (this.progress.playlists_skipped || 0) + 1,
+              current_track_index: 0,
+              total_tracks: 0,
+            });
+            nextOffset++;
+            processedInChunk++;
+            continue;
+          }
+        }
+
+        this.progress.update({
+          current_playlist: playlist.name,
+          current_playlist_index: globalIndex + 1,
+          current_track_index: 0,
+          total_tracks: playlist.tracks_count,
+        });
+
+        try {
+          // Create a temporary report for this single playlist
+          const playlistReport: SyncReport = {
+            started_at: new Date().toISOString(),
+            completed_at: null,
+            tracks_matched: 0,
+            tracks_not_matched: 0,
+            tracks_skipped: 0,
+            tracks_already_in_qobuz: 0,
+            playlists_skipped: 0,
+            isrc_matches: 0,
+            fuzzy_matches: 0,
+            missing_tracks: [],
+            synced_tracks: [],
+            errors: [],
+          };
+
+          const wasCancelled = await this.syncSinglePlaylist(playlist, playlistReport, dryRun);
+
+          // Merge playlist report into chunk report
+          partialReport.tracks_matched! += playlistReport.tracks_matched;
+          partialReport.tracks_not_matched! += playlistReport.tracks_not_matched;
+          partialReport.isrc_matches! += playlistReport.isrc_matches;
+          partialReport.fuzzy_matches! += playlistReport.fuzzy_matches;
+          partialReport.missing_tracks!.push(...playlistReport.missing_tracks);
+          partialReport.synced_tracks!.push(...playlistReport.synced_tracks);
+          partialReport.errors!.push(...playlistReport.errors);
+
+          if (wasCancelled) {
+            break;
+          }
+
+          // Mark playlist as synced after successful sync
+          if (!dryRun && options?.onPlaylistSynced) {
+            await options.onPlaylistSynced(playlist.id, playlist.snapshot_id, playlist.tracks_count);
+          }
+        } catch (error) {
+          logger.error(`Error syncing playlist ${playlist.name}: ${error}`);
+          partialReport.errors!.push(`Playlist ${playlist.name}: ${String(error)}`);
+        }
+
+        nextOffset++;
+        processedInChunk++;
+      }
+
+      partialReport.completed_at = new Date().toISOString();
+    } catch (error) {
+      logger.error(`Playlist chunk sync failed: ${error}`);
+      partialReport.errors!.push(String(error));
+      partialReport.completed_at = new Date().toISOString();
+    }
+
+    const hasMore = nextOffset < totalItems;
+    logger.info(`Playlist chunk complete: processed ${processedInChunk}, nextOffset=${nextOffset}, total=${totalItems}, hasMore=${hasMore}`);
 
     return {
       hasMore,
