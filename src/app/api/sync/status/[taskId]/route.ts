@@ -34,26 +34,42 @@ export async function GET(
       if (activeTask.migration_id) {
         const migration = await storage.getMigration(activeTask.migration_id);
         if (migration) {
-          // Merge cumulative stats from migration with chunk progress
-          progress = {
-            ...progress,
-            tracks_matched: migration.tracks_matched || 0,
-            tracks_not_matched: migration.tracks_not_matched || 0,
-            isrc_matches: migration.isrc_matches || 0,
-            fuzzy_matches: migration.fuzzy_matches || 0,
-          };
-          // Also merge cumulative stats into report for final display
-          if (report) {
-            report = {
-              ...report,
+          // For running tasks, prefer active task progress if it has stats
+          // (migration stats are only updated at chunk/sync completion)
+          const activeHasStats = progress &&
+            typeof progress === 'object' &&
+            ((progress as Record<string, unknown>).tracks_matched !== undefined ||
+             (progress as Record<string, unknown>).tracks_not_matched !== undefined);
+
+          const migrationHasStats = migration.tracks_matched > 0 ||
+            migration.tracks_not_matched > 0 ||
+            migration.isrc_matches > 0 ||
+            migration.fuzzy_matches > 0;
+
+          // Only merge migration stats if:
+          // 1. Task is not running (completed chunks have finalized stats), OR
+          // 2. Active task has no stats but migration does (resuming from chunk)
+          if (activeTask.status !== 'running' || (!activeHasStats && migrationHasStats)) {
+            progress = {
+              ...progress,
               tracks_matched: migration.tracks_matched || 0,
               tracks_not_matched: migration.tracks_not_matched || 0,
-              albums_matched: migration.tracks_matched || 0,
-              albums_not_matched: migration.tracks_not_matched || 0,
               isrc_matches: migration.isrc_matches || 0,
-              upc_matches: migration.isrc_matches || 0,
               fuzzy_matches: migration.fuzzy_matches || 0,
             };
+            // Also merge cumulative stats into report for final display
+            if (report) {
+              report = {
+                ...report,
+                tracks_matched: migration.tracks_matched || 0,
+                tracks_not_matched: migration.tracks_not_matched || 0,
+                albums_matched: migration.tracks_matched || 0,
+                albums_not_matched: migration.tracks_not_matched || 0,
+                isrc_matches: migration.isrc_matches || 0,
+                upc_matches: migration.isrc_matches || 0,
+                fuzzy_matches: migration.fuzzy_matches || 0,
+              };
+            }
           }
         }
       }
