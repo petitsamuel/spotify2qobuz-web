@@ -19,6 +19,7 @@ const ARTIST_THRESHOLD = 70;
 const DURATION_TOLERANCE_MS = 10000;
 const MIN_COMBINED_SCORE = 78;
 const MIN_ARTIST_SCORE_FOR_SUGGESTION = 60; // Increased from 50 to reduce bad suggestions
+const MIN_TITLE_SCORE_FOR_SUGGESTION = 50; // Require reasonable title similarity for suggestions
 const MIN_TOKEN_OVERLAP_FOR_SUGGESTION = 1; // Require at least one common token in artist names
 
 /**
@@ -406,8 +407,11 @@ export class TrackMatcher {
     // No match - return suggestions with stricter filtering
     const suggestions: Suggestion[] = [];
     for (const sc of scoredCandidates.slice(0, 10)) {
-      // Check basic score thresholds
-      if (sc.score < suggestionThreshold || sc.artistScore < MIN_ARTIST_SCORE_FOR_SUGGESTION) {
+      // Check basic score thresholds - require both reasonable title AND artist match
+      // This prevents showing completely different songs by the same artist
+      if (sc.score < suggestionThreshold ||
+          sc.artistScore < MIN_ARTIST_SCORE_FOR_SUGGESTION ||
+          sc.titleScore < MIN_TITLE_SCORE_FOR_SUGGESTION) {
         continue;
       }
 
@@ -429,20 +433,25 @@ export class TrackMatcher {
         }
       }
 
+      // For suggestions, use a title-weighted score (70-30) rather than equal weighting
+      // This better reflects what users want - similar songs, not just any song by the artist
+      const suggestionScore = sc.titleScore * 0.7 + sc.artistScore * 0.3;
+
       suggestions.push({
         qobuz_id: sc.candidate.id,
         title: sc.candidate.title,
         artist: sc.candidate.artist,
         album: sc.candidate.album,
-        score: Math.round(sc.score * 10) / 10,
+        score: Math.round(suggestionScore * 10) / 10,
         title_score: Math.round(sc.titleScore * 10) / 10,
         artist_score: Math.round(sc.artistScore * 10) / 10,
         duration_diff_sec: Math.round(sc.durationDiff / 100) / 10,
       });
-      if (suggestions.length >= 5) break;
     }
 
-    return [null, suggestions];
+    // Sort by title-weighted score and take top 5
+    suggestions.sort((a, b) => b.score - a.score);
+    return [null, suggestions.slice(0, 5)];
   }
 
   private async matchByIsrc(spotifyTrack: SpotifyTrack): Promise<MatchResult | null> {
