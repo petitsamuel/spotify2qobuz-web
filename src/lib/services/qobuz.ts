@@ -511,6 +511,56 @@ export class QobuzClient {
   }
 
   /**
+   * Get full track details from a playlist.
+   * @throws QobuzApiError on failure
+   */
+  async getPlaylistTracksWithDetails(playlistId: string): Promise<QobuzTrack[]> {
+    const tracks: QobuzTrack[] = [];
+    let offset = 0;
+    const limit = 500;
+
+    while (true) {
+      const data = await this.request<{
+        tracks?: {
+          items?: Array<{
+            id: number;
+            title: string;
+            performer: { name: string };
+            album: { title: string };
+            duration: number;
+            isrc?: string;
+          }>;
+          total?: number;
+        };
+      }>('playlist/get', { playlist_id: playlistId, extra: 'tracks', limit, offset });
+
+      if (!data.tracks) break;
+
+      const items = data.tracks.items || [];
+      if (items.length === 0) break;
+
+      for (const item of items) {
+        tracks.push({
+          id: item.id,
+          title: item.title,
+          artist: item.performer?.name || 'Unknown',
+          album: item.album?.title || 'Unknown',
+          duration: item.duration * 1000,
+          isrc: item.isrc,
+        });
+      }
+
+      const total = data.tracks.total || 0;
+      if (tracks.length >= total) break;
+
+      offset += limit;
+    }
+
+    logger.debug(`Found ${tracks.length} tracks with details in playlist ${playlistId}`);
+    return tracks;
+  }
+
+  /**
    * Get favorite track IDs.
    * @throws QobuzApiError on failure
    */
