@@ -223,12 +223,39 @@ export async function runSyncChunk(
         status: 'completed',
       });
 
+      // Build aggregated report with cumulative totals (not just last chunk)
+      const finalCumulativeStats = {
+        tracks_matched: cumulativeStats.tracks_matched + chunkTracksMatched,
+        tracks_not_matched: cumulativeStats.tracks_not_matched + chunkTracksNotMatched,
+        isrc_matches: cumulativeStats.isrc_matches + chunkIsrcMatches,
+        fuzzy_matches: cumulativeStats.fuzzy_matches + chunkFuzzyMatches,
+      };
+
+      // Create aggregated report using cumulative stats while preserving other report fields
+      const aggregatedReport = {
+        ...chunkResult.partialReport,
+        // Override count fields with cumulative totals
+        ...(syncType === 'albums'
+          ? {
+              albums_matched: finalCumulativeStats.tracks_matched,
+              albums_not_matched: finalCumulativeStats.tracks_not_matched,
+              upc_matches: finalCumulativeStats.isrc_matches,
+              fuzzy_matches: finalCumulativeStats.fuzzy_matches,
+            }
+          : {
+              tracks_matched: finalCumulativeStats.tracks_matched,
+              tracks_not_matched: finalCumulativeStats.tracks_not_matched,
+              isrc_matches: finalCumulativeStats.isrc_matches,
+              fuzzy_matches: finalCumulativeStats.fuzzy_matches,
+            }),
+      };
+
       await storage.updateActiveTask(
         taskId,
         'completed',
         undefined,
         undefined,
-        chunkResult.partialReport as unknown as Record<string, unknown>,
+        aggregatedReport as unknown as Record<string, unknown>,
         { offset: chunkResult.nextOffset, totalItems: chunkResult.totalItems, processedInChunk: 0, hasMore: false }
       );
       await storage.updateTask(taskId, 'completed');
